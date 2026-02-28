@@ -230,6 +230,7 @@ def buildFeatureNetwork(inputs: Tuple, params: Dict[str, Any], rng: Any):
                 layers=params.get("layers", 0),
                 use_layernorm=params.get("use_layernorm", False),
                 balanced=params.get("balanced", False),
+                activation=params.get("activation", "relu"),
                 name="phi",
                 conv=params.get("conv", "Conv2D"),
                 coord=params.get("coord", False),
@@ -1281,6 +1282,7 @@ class ForagerNet(hk.Module):
         balanced=False,
         name: str = "",
         conv: str = "Conv2D",
+        activation: Optional[str] = "relu",
         coord: bool = False,
         **kwargs,
     ):
@@ -1291,6 +1293,10 @@ class ForagerNet(hk.Module):
         self.use_layernorm = use_layernorm
         self.balanced = balanced
         self.coord_conv = coord
+        if activation == "crelu":
+            self.activation_fn = hku.crelu
+        else:
+            self.activation_fn = jax.nn.relu
         w_init = hk.initializers.Orthogonal(np.sqrt(2))
 
         conv_layers = []
@@ -1300,7 +1306,7 @@ class ForagerNet(hk.Module):
                 conv_layers.append(
                     hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                 )
-            conv_layers.append(jax.nn.relu)
+            conv_layers.append(self.activation_fn)
         if self.coord_conv:
             conv_layers.append(self._add_coord_channels)
         if conv == "PConv2DConv2D" or conv == "Conv2D":
@@ -1309,7 +1315,7 @@ class ForagerNet(hk.Module):
                 conv_layers.append(
                     hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                 )
-            conv_layers.append(jax.nn.relu)
+            conv_layers.append(self.activation_fn)
 
         self.conv = hk.Sequential(conv_layers)
 
@@ -1322,7 +1328,7 @@ class ForagerNet(hk.Module):
                 vision_proj.append(
                     hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                 )
-            vision_proj.append(jax.nn.relu)
+            vision_proj.append(self.activation_fn)
             self.vision_proj = hk.Sequential(vision_proj)
 
             if self.scalars > 0:
@@ -1331,7 +1337,7 @@ class ForagerNet(hk.Module):
                     scalars_proj.append(
                         hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                     )
-                scalars_proj.append(jax.nn.relu)
+                scalars_proj.append(self.activation_fn)
                 self.scalars_proj = hk.Sequential(scalars_proj)
 
         if layers > 0:
@@ -1342,7 +1348,7 @@ class ForagerNet(hk.Module):
                     mlp_layers.append(
                         hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                     )
-                mlp_layers.append(jax.nn.relu)
+                mlp_layers.append(self.activation_fn)
             self.mlp = hk.Sequential(mlp_layers)
 
         self.phi = hk.Flatten(preserve_dims=1, name="phi")

@@ -7,8 +7,7 @@
         "environment": {
             "env_id": "ForagaxSquareWaveTwoBiome-v11",
             "aperture_size": -1,
-            "observation_type": "object",
-			"random_shift_max_steps": 10000000
+            "observation_type": "object"
         },
         "experiment": {
             "seed_offset": 0,

@@ -11,11 +11,8 @@ FROZEN_LIST = [
     "DQN",
     "DQN_reward_trace",
     "RealTimeActorCriticMLP",
-    "RealTimeActorCriticConv",
     "ActorCriticMLP",
     "ActorCriticMLP-reward-trace"
-    "ActorCriticConv",
-    "ActorCriticConv-reward-trace"
 ]
 
 def main():
