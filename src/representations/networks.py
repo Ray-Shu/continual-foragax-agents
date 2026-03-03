@@ -286,6 +286,7 @@ def buildFeatureNetwork(inputs: Tuple, params: Dict[str, Any], rng: Any):
                 post_gru_layers=params.get("post_gru_layers", 0),
                 learn_initial_h=params.get("learn_initial_h", True),
                 use_layernorm=params.get("use_layernorm", False),
+                mlp=params.get("mlp", False),
                 name="ForagerGRUNetReLU",
             )
             return net(x, *args, **kwargs)
@@ -862,6 +863,7 @@ class ForagerGRUNetReLU(hk.Module):
         post_gru_layers: int = 0,
         learn_initial_h=True,
         use_layernorm=False,
+        mlp: bool = False,
         name: str = "",
     ):
         super().__init__(name=name)
@@ -874,12 +876,17 @@ class ForagerGRUNetReLU(hk.Module):
         self.use_layernorm = use_layernorm
         self.pre_gru_layers = pre_gru_layers
         self.post_gru_layers = post_gru_layers
+        self.mlp = mlp
         w_init = hk.initializers.Orthogonal(np.sqrt(2))
 
-        self.conv = hk.Conv2D(16, 3, 1, w_init=w_init, name="phi")
-        self.conv_layer_norm = hk.LayerNorm(
-            axis=-1, create_scale=True, create_offset=True
-        )
+        if mlp == False:
+            embedding = [hk.Conv2D(16, 3, 1, w_init=w_init, name="phi")]
+            if use_layernorm:
+                embedding.append(
+                    hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
+                )
+            embedding.append(jax.nn.relu)
+            self.embedding = hk.Sequential(embedding)
 
         self.flatten = hk.Flatten(preserve_dims=2, name="flatten")
 
@@ -955,18 +962,13 @@ class ForagerGRUNetReLU(hk.Module):
 
         N, T, *feat = x.shape
 
-        x = jnp.reshape(x, (N * T, *feat))
+        if not self.mlp:
+            x = jnp.reshape(x, (N * T, *feat))
+            x = self.embedding(x)
+            _, *feat = x.shape
+            x = jnp.reshape(x, (N, T, *feat))
 
-        h = self.conv(x)
-        if self.use_layernorm:
-            h = self.conv_layer_norm(h)
-        h = jax.nn.relu(h)
-
-        _, *feat = h.shape
-
-        h = jnp.reshape(h, (N, T, *feat))
-
-        h = self.flatten(h)
+        h = self.flatten(x)
 
         # Balanced mode: project vision and scalars to equal-sized embeddings
         if self.balanced:

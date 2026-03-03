@@ -314,7 +314,7 @@ class DRQN(NNAgent):
             }
         )
         state = self._decay_epsilon(state)
-        state = self._maybe_update(state)
+        state = self._maybe_update_if_not_frozen(state)
         return state, a
 
     @partial(jax.jit, static_argnums=0)
@@ -367,7 +367,7 @@ class DRQN(NNAgent):
                 "reset": jnp.bool(False),
             }
         )
-        state = self._maybe_update(state)
+        state = self._maybe_update_if_not_frozen(state)
         state = self._decay_epsilon(state)
         return state, a
 
@@ -386,6 +386,6 @@ class DRQN(NNAgent):
 
         state, _ = self._compute_reward_trace(state, reward)
 
-        state = self._maybe_update(state)
+        state = self._maybe_update_if_not_frozen(state)
         state = self._decay_epsilon(state)
         return state

@@ -32,10 +32,7 @@
                 0.0001
             ],
             "beta1": 0.9,
-            "beta2": [
-                0.9,
-                0.999
-            ],
+            "beta2": 0.999,
             "eps": 1e-5
         },
         "representation": {
@@ -43,13 +40,7 @@
             "hidden": 64,
             "layers": 2,
             "conv": "None",
-            "use_layernorm": true,
-            "scalar_features": [
-                [
-                    "last_action",
-                    "last_reward"
-                ]
-            ]
+            "use_layernorm": true
         },
         "update_freq": 4
     }

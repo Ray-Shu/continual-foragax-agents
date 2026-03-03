@@ -63,21 +63,23 @@ LABEL_MAP: Dict[str, str] = {
     "PPO_L2": "PPO (L2)",
     "ActorCriticMLP": "PPO",
     "ActorCriticMLP-l2": "PPO (L2)",
+    "ActorCriticMLP-l2-init": "PPO (L2 Init)",
     "ActorCriticMLP-world": "PPO (World)",
-    "RealTimeActorCriticMLP": "RTU-PPO",
-    "RealTimeActorCriticMLP-l2": "RTU-PPO (L2)",
-    "PPO-RTU": "RTU-PPO",
-    "PPO-RTU_128": "RTU-PPO",
-    "PPO-RTU_L2": "RTU-PPO (L2)",
-    "PPO-RTU_LN_128": "RTU-PPO",
-    "PPO-RTU_LN_HINT_128": "RTU-PPO (CA)",
+    "ActorCriticMLP-reward-trace": "PPO (RT)",
+    "RealTimeActorCriticMLP": "RTU",
+    "RealTimeActorCriticMLP-l2": "RTU (L2)",
+    "PPO-RTU": "RTU",
+    "PPO-RTU_128": "RTU",
+    "PPO-RTU_L2": "RTU (L2)",
+    "PPO-RTU_LN_128": "RTU (LN)",
     "PPO-RTU_LN_128_512": "RTU (LN, H512)",
     "RealTimeActorCriticMLP-world": "RTU (World)",
     "DQN": "DQN",
     "DQN_CReLU": "DQN (CReLU)",
     "DQN_L2": "DQN (L2)",
     "DQN_L2_Init": "DQN (L2 Init)",
-    "DQN_LN": "DQN",
+    "DQN_LN": "DQN (LN)",
+    "DQN_reward_trace": "DQN (RT)",
     "DQN_Reset_Head": "DQN (Head Reset)",
     "DQN_Hare_and_Tortoise": "DQN (Hare & Tortoise)",
     "DQN_Shrink_and_Perturb": "DQN (Shrink & Perturb)",
@@ -89,9 +91,7 @@ LABEL_MAP: Dict[str, str] = {
     "DRQN_1_1": "DRQN (1-1)",
     "DRQN_LN_0_2": "DRQN (LN, 0-2)",
     "DRQN_0_2": "DRQN (0-2)",
-    "DQN_reward_trace": "DQN (RT)",
-    "ActorCriticMLP-reward-trace": "PPO (RT)",
-    "DQN_LN_HINT": "DQN (CA)",
+    "DRQN": "DRQN",
     "Search-Brown": "Search (Brown)",
     "Search-Brown-Avoid-Green": "Search (+B-G)",
     "Search-Morel": "Search (Morel)",
@@ -351,20 +351,25 @@ def format_metric_name(metric: str) -> str:
     return metric.replace("_", " ").title()
 
 
-def get_mapped_label(label: str, label_map: Optional[Dict[str, str]] = None) -> str:
+def get_mapped_label(label: str, label_map: Optional[Dict[str, str]] = None, disable_fov: bool = False) -> str:
     """Get the mapped label, handling apertures and frozen variants."""
     if label_map and label in label_map:
         return label_map[label]
     if ":" in label:
         alg, aperture = label.split(":", 1)
         base_label = label_map.get(alg, alg) if label_map else alg
-        if "Frozen" in base_label:
+        if "frozen" in base_label.lower():
             # For frozen variants, put FOV inline with DQN and Frozen on new line
             dqn_part = base_label.split(" (")[0]
             frozen_part = base_label.split(" (", 1)[1]
-            return f"{dqn_part} "#" (FOV {aperture})\n({frozen_part}"
+            if disable_fov:
+                return f"{dqn_part}\n({frozen_part}"
+            else:
+                return f"{dqn_part} (FOV {aperture})\n({frozen_part}"
         else:
-            return f"{base_label}" # (FOV {aperture})"
+            if disable_fov:
+                return base_label
+            return f"{base_label} (FOV {aperture})"
     return label
 
 
