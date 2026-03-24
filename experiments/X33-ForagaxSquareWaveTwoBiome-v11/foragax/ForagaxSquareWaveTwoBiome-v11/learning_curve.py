@@ -308,12 +308,12 @@ if __name__ == "__main__":
     ax = axes[0][0]
     # Two search baselines
     # RTU/PPO at FOV 9 and 15 (base, non-frozen)
-    # plot_selection(ax, "SINGLE:Search-Oracle", None, "", color_index=-1)
-    # plot_selection(ax, "SINGLE:Search-Nearest", None, "", color_index=-2)
+    plot_selection(ax, "SINGLE:Search-Oracle", None, "", color_index=-1)
+    plot_selection(ax, "SINGLE:Search-Nearest", None, "", color_index=-2)
     # plot_selection(ax, "SINGLE:Search-Brown-Avoid-Green", None, "", color_index=-2)
     # plot_selection(ax, "RTU", 9, "5M", color_index=0)
-    plot_selection(ax, "PPO", 9, "", color_index=1, require_reward_trace=True, require_transfer=True)
-    plot_selection(ax, "PPO", 9, "", color_index=2, require_reward_trace=True)
+    plot_selection(ax, "PPO", 9, "", color_index=1, require_reward_trace=True)
+    plot_selection(ax, "PPO", 9, "", color_index=2)
     # plot_selection(ax, "RTU", 15, "5M", color_index=2)
     # plot_selection(ax, "PPO", 9, "5M", color_index=3, require_reward_trace=True)
     # plot_selection(ax, "PPO", 5, "5M", color_index=4, require_reward_trace=True)

@@ -81,6 +81,8 @@ class TrainConfig:
     video_length: int = struct.field(pytree_node=False)
     use_l2_init: bool = struct.field(pytree_node=False)
     use_spectral_reg: bool = struct.field(pytree_node=False)
+    use_reset: bool = struct.field(pytree_node=False)
+    use_shrink_and_perturb: bool = struct.field(pytree_node=False)
     # ---- DYNAMIC (may vary per idx; arithmetic only) ----
     max_grad_norm: float
     l2_reg_pi: float
@@ -109,7 +111,11 @@ class TrainConfig:
     lambda_spectral_pi: float = 0.0
     lambda_spectral_vf: float = 0.0
     freeze_steps: int = -1
-
+    reset_interval: int = -1
+    sp_interval: int = -1
+    shrink_factor: float = 1.0
+    noise_scale: float = 0.0
+    
 class GymnaxEnvState(struct.PyTreeNode):
     to_render: bool = struct.field(pytree_node=True)
     cond_render: Callable = struct.field(pytree_node=False)
@@ -810,6 +816,82 @@ def experiment(rng, config: TrainConfig):
         zeros = jnp.zeros((config.epochs, config.num_mini_batch), dtype=jnp.float32)
         return (zeros, (zeros, zeros, zeros))
 
+    # Last-layer reset: reinitialize actor_mean and critic_value params + optimizer states.
+    # The network is re-initialized from scratch with a fresh key; only the last-layer
+    # leaves are swapped in (params and optimizer state).  Guarded by `config.use_reset`.
+    if config.use_reset:
+        # Pre-compute which leaves belong to the last layer, keyed by flattened path.
+        _flat_params = traverse_util.flatten_dict(network_params, sep="/")
+        _last_layer_keys = frozenset(
+            k for k in _flat_params
+            if "actor_mean" in k or "critic_value" in k
+        )
+
+        def _is_last_layer(path_str):
+            return path_str in _last_layer_keys
+
+        _last_layer_mask = traverse_util.unflatten_dict(
+            {tuple(k.split("/")): _is_last_layer(k) for k in _flat_params}
+        )
+
+        def _reset_last_layer(train_state, rng):
+            """Reinitialize last-layer params and their optimizer states."""
+            rng, init_rng = jax.random.split(rng)
+            # Get fresh random parameters for the entire network
+            fresh_params = network.init(init_rng, init_hstate, init_x)
+
+            # Selectively replace only last-layer params
+            new_params = jax.tree_util.tree_map(
+                lambda mask, fresh, old: jnp.where(mask, fresh, old),
+                _last_layer_mask,
+                fresh_params,
+                train_state.params,
+            )
+
+            # Reinitialize optimizer state: build fresh opt state from new params,
+            # then selectively swap only last-layer entries.
+            fresh_opt_state = tx.init(new_params)
+            new_opt_state = jax.tree_util.tree_map_with_path(
+                lambda path, fresh_val, old_val: (
+                    fresh_val if any(
+                        (hasattr(k, "key") and (
+                            "actor_mean" in k.key or "critic_value" in k.key
+                        ))
+                        for k in path
+                    ) else old_val
+                ),
+                fresh_opt_state,
+                train_state.opt_state,
+            )
+
+            train_state = train_state.replace(
+                params=new_params,
+                opt_state=new_opt_state,
+            )
+            return train_state, rng
+
+    # Shrink and Perturb: shrink all params towards zero and add Gaussian noise,
+    # then reinitialize optimizer state.  Guarded by `config.use_shrink_and_perturb`.
+    if config.use_shrink_and_perturb:
+        def _shrink_and_perturb(train_state, rng):
+            """Apply shrink-and-perturb to all network parameters."""
+            rng, noise_rng = jax.random.split(rng)
+
+            def sp(p):
+                noise = jax.random.normal(noise_rng, shape=p.shape, dtype=p.dtype)
+                return p * config.shrink_factor + noise * config.noise_scale
+
+            new_params = jax.tree_util.tree_map(sp, train_state.params)
+
+            # Reinitialize optimizer state for the perturbed parameters
+            new_opt_state = tx.init(new_params)
+
+            train_state = train_state.replace(
+                params=new_params,
+                opt_state=new_opt_state,
+            )
+            return train_state, rng
+
     env_step_state = (
         train_state,
         gymnax_state,
@@ -977,6 +1059,34 @@ def experiment(rng, config: TrainConfig):
         (train_state, rng), loss_info = jax.lax.cond(
             should_update, update_step, skip_update, update_state
         )
+
+        # Periodically reset last layer (actor_mean + critic_value) params and optimizer
+        # states.  Guarded at trace time by config.use_reset so no overhead when disabled.
+        if config.use_reset:
+            should_reset = (iteration_idx > 0) & (
+                iteration_idx % config.reset_interval == 0
+            )
+            train_state, rng = jax.lax.cond(
+                should_reset,
+                _reset_last_layer,
+                lambda ts, r: (ts, r),
+                train_state,
+                rng,
+            )
+
+        # Periodically shrink all params and add noise, then reinit optimizer.
+        # Guarded at trace time by config.use_shrink_and_perturb.
+        if config.use_shrink_and_perturb:
+            should_sp = (iteration_idx > 0) & (
+                iteration_idx % config.sp_interval == 0
+            )
+            train_state, rng = jax.lax.cond(
+                should_sp,
+                _shrink_and_perturb,
+                lambda ts, r: (ts, r),
+                train_state,
+                rng,
+            )
 
         # Collect a scalar reward summary for this iteration (mean reward over rollout)
         rewards = traj_batch.reward
@@ -1248,6 +1358,12 @@ def main():
             freeze_steps=int(freeze_steps),
             allocate_frames=allocate_frames,
             video_length=int(hypers.get("experiment", {}).get("video_length", 1000)),
+            use_reset=bool(hypers.get("reset_interval", -1) > 0),
+            reset_interval=int(hypers.get("reset_interval", -1)),
+            use_shrink_and_perturb=bool(hypers.get("sp_interval", -1) > 0),
+            sp_interval=int(hypers.get("sp_interval", -1)),
+            shrink_factor=float(hypers.get("shrink_factor", 1.0)),
+            noise_scale=float(hypers.get("noise_scale", 0.0)),
         )
         configs.append(config)
 
