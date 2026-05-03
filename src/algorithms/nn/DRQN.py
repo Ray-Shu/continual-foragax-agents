@@ -1,20 +1,19 @@
 from collections.abc import Mapping
 from dataclasses import replace
 from functools import partial
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import haiku as hk
 import jax
 import jax.numpy as jnp
 import optax
-from jax.flatten_util import ravel_pytree
 from ml_instrumentation.Collector import Collector
 
 import utils.chex as cxu
 from algorithms.nn.NNAgent import AgentState as BaseAgentState
 from algorithms.nn.NNAgent import Hypers as BaseHypers
 from algorithms.nn.NNAgent import NNAgent
-from representations.networks import NetworkBuilder, reluLayers
+from representations.networks import NetworkBuilder
 from utils.jax import huber_loss
 from utils.policies import egreedy_probabilities
 
@@ -72,17 +71,25 @@ class DRQN(NNAgent):
         ):
             dummy_hint_trace = jnp.zeros(observations["hint"])
 
+        dummy_scalars = self.encode_scalar_features(
+            jnp.int32(0),
+            jnp.float32(0),
+            jnp.float32(0),
+            dummy_hint,
+            dummy_hint_trace,
+        )
+        dummy_network_carry = self.phi(
+            self.state.params,
+            jnp.expand_dims(jnp.zeros(image_shape), 0),
+            scalars=jnp.expand_dims(dummy_scalars, 0),
+            carry=None,
+        )[2]
+        dummy_carry = self._carry_for_buffer(dummy_network_carry)
         dummy_timestep = {
             "x": jnp.zeros(image_shape),
-            "carry": jnp.zeros(self.hidden_size),
+            "carry": dummy_carry,
             "reset": jnp.bool(True),
-            "scalars": self.encode_scalar_features(
-                jnp.int32(0),
-                jnp.float32(0),
-                jnp.float32(0),
-                dummy_hint,
-                dummy_hint_trace,
-            ),
+            "scalars": dummy_scalars,
             "a": jnp.int32(0),
             "r": jnp.float32(0),
             "gamma": jnp.float32(0),
@@ -119,6 +126,40 @@ class DRQN(NNAgent):
 
         self.q_net, _, self.q = builder.addHead(q_net_builder, name="q")
 
+    def _extract_carry(self, carry: Any):
+        if isinstance(carry, tuple):
+            return carry
+        return carry[:, -1]
+
+    def _carry_for_buffer(self, carry: Any):
+        if isinstance(carry, tuple):
+            return carry
+        return carry[0]
+
+    def _slice_carry(self, carry: Any, start: int, end: int | None):
+        if isinstance(carry, tuple):
+            return jax.tree.map(lambda x: x[:, start:end], carry)
+        return carry[:, start:end]
+
+    def _split_carry(self, carry: Any, split: int):
+        if isinstance(carry, tuple):
+            def _split(x):
+                left, right = jnp.hsplit(x, jnp.array([split]))
+                return left, right
+
+            split_tree = jax.tree.map(_split, carry)
+            left = jax.tree.map(lambda x: x[0], split_tree)
+            right = jax.tree.map(lambda x: x[1], split_tree)
+            return left, right
+
+        left, right = jnp.hsplit(carry, jnp.array([split]))
+        return left, right
+
+    def _set_carry_start(self, carry: Any, new_carry: Any):
+        if isinstance(carry, tuple):
+            return jax.tree.map(lambda base, new: base.at[:, 0].set(new), carry, new_carry)
+        return carry.at[:, 0].set(new_carry)
+
     # internal compiled version of the value function
     @partial(jax.jit, static_argnums=0)
     def _values(
@@ -126,12 +167,12 @@ class DRQN(NNAgent):
         state: AgentState,
         x: jax.Array,
         scalars: jax.Array,
-        carry: jax.Array = None,
+        carry: Optional[Any] = None,
     ):  # type: ignore
         scalars_seq = jnp.expand_dims(scalars, 1)
         phi = self.phi(state.params, x, scalars=scalars_seq, carry=carry)
 
-        return self.q(state.params, phi[0][:, -1]), phi[1][:, -1], phi[2]
+        return self.q(state.params, phi[0][:, -1]), self._extract_carry(phi[1]), phi[2]
 
     @partial(jax.jit, static_argnums=0)
     def _policy(
@@ -193,8 +234,11 @@ class DRQN(NNAgent):
 
         updates, new_optim = optimizer.update(grad, state.optim, state.params)
         new_params = optax.apply_updates(state.params, updates)
-        flat_updates, _ = ravel_pytree(updates)
-        weight_change = jnp.linalg.norm(flat_updates, ord=1)
+        weight_change = jax.tree.reduce(
+            lambda total, leaf: total + jnp.sum(jnp.abs(leaf)),
+            updates,
+            initializer=jnp.array(0.0, dtype=jnp.float32),
+        )
         metrics["weight_change"] = weight_change
 
         return replace(state, params=new_params, optim=new_optim), metrics
@@ -202,17 +246,16 @@ class DRQN(NNAgent):
     # Of shape: <batch, sequence, *feat>
     # TODO: Important, this assumes that no truncation happens, that is end() is properly called before calling start()
     def _loss(
-        self, params: hk.Params, target: hk.Params, batch: Dict, weights: jax.Array
+        self, params: hk.Params, target: hk.Params, batch: Dict, _weights: jax.Array
     ):
-        B, T = batch["a"][:, :-1].shape
-        weights = jnp.broadcast_to(weights[:, None], (B, T))
         x = batch["x"][:, :-1]
         xp = batch["x"][:, 1:]
         a = batch["a"][:, :-1]
         r = batch["r"][:, :-1]
         g = batch["gamma"][:, :-1]
-        carry = batch["carry"][:, :-1]
-        carryp = batch["carry"][:, 1:]
+        # batch["carry"] is expected to have shape [B, T+1, *carry_shape], where carry at time t corresponds to the transition from x[t-1] to x[t]
+        carry = self._slice_carry(batch["carry"], 0, -1)
+        carryp = self._slice_carry(batch["carry"], 1, None)
         reset = batch["reset"][:, :-1]
 
         scalars = batch["scalars"][:, :-1]
@@ -220,41 +263,47 @@ class DRQN(NNAgent):
 
         # Perform burn-in
         if self.burn_in_steps > 0:
-            b_x, x = jnp.hsplit(x, [self.burn_in_steps])
-            b_xp, xp = jnp.hsplit(xp, [self.burn_in_steps])
-            b_reset, reset = jnp.hsplit(reset, [self.burn_in_steps])
-            b_carry, carry = jnp.hsplit(carry, [self.burn_in_steps])
-            b_carryp, carryp = jnp.hsplit(carryp, [self.burn_in_steps])
-            b_scalars, scalars = jnp.hsplit(scalars, [self.burn_in_steps])
-            b_scalars_p, scalars_p = jnp.hsplit(scalars_p, [self.burn_in_steps])
-            _, a = jnp.hsplit(a, [self.burn_in_steps])
-            _, r = jnp.hsplit(r, [self.burn_in_steps])
-            _, g = jnp.hsplit(g, [self.burn_in_steps])
-            _, weights = jnp.hsplit(weights, [self.burn_in_steps])
+            split_idx = jnp.array([self.burn_in_steps])
+            b_x, x = jnp.hsplit(x, split_idx)
+            b_xp, xp = jnp.hsplit(xp, split_idx)
+            b_reset, reset = jnp.hsplit(reset, split_idx)
+            b_carry, carry = self._split_carry(carry, self.burn_in_steps)
+            b_carryp, carryp = self._split_carry(carryp, self.burn_in_steps)
+            b_scalars, scalars = jnp.hsplit(scalars, split_idx)
+            b_scalars_p, scalars_p = jnp.hsplit(scalars_p, split_idx)
+            _, a = jnp.hsplit(a, split_idx)
+            _, r = jnp.hsplit(r, split_idx)
+            _, g = jnp.hsplit(g, split_idx)
 
-            carry = carry.at[:, 0].set(
+            carry = self._set_carry_start(
+                carry,
                 jax.lax.stop_gradient(
-                    self.phi(
-                        params,
-                        b_x,
-                        scalars=b_scalars,
-                        carry=b_carry,
-                        reset=b_reset,
-                        is_target=False,
-                    )[1][:, -1, ...]
-                )
+                    self._extract_carry(
+                        self.phi(
+                            params,
+                            b_x,
+                            scalars=b_scalars,
+                            carry=b_carry,
+                            reset=b_reset,
+                            is_target=False,
+                        )[1]
+                    )
+                ),
             )
-            carryp = carryp.at[:, 0].set(
+            carryp = self._set_carry_start(
+                carryp,
                 jax.lax.stop_gradient(
-                    self.phi(
-                        target,
-                        b_xp,
-                        scalars=b_scalars_p,
-                        carry=b_carryp,
-                        reset=b_reset,
-                        is_target=True,
-                    )[1][:, -1, ...]
-                )
+                    self._extract_carry(
+                        self.phi(
+                            target,
+                            b_xp,
+                            scalars=b_scalars_p,
+                            carry=b_carryp,
+                            reset=b_reset,
+                            is_target=True,
+                        )[1]
+                    )
+                ),
             )
 
         phi = self.phi(
@@ -302,14 +351,13 @@ class DRQN(NNAgent):
             jnp.int32(-1), jnp.float32(0), jnp.float32(0), hint
         )
         state, a = self.act(state, obs_img, scalars)
+        carry_for_buffer = self._carry_for_buffer(state.carry)  # Reset within alg.
         state.last_timestep.update(
             {
                 "x": obs_img,
                 "a": a,
                 "scalars": scalars,
-                "carry": jnp.zeros(
-                    self.hidden_size
-                ),  # Replaced with learnt init within alg
+                "carry": carry_for_buffer,
                 "reset": jnp.bool(True),
             }
         )
@@ -325,16 +373,25 @@ class DRQN(NNAgent):
         obs: Union[jax.Array, Dict[str, jax.Array]],
         extra: Dict[str, jax.Array],
     ):
+        return self._step_impl(state, reward, obs, extra, True)
+
+    @partial(jax.jit, static_argnums=(0, 5))
+    def _step_impl(
+        self,
+        state: AgentState,
+        reward: jax.Array,
+        obs: Union[jax.Array, Dict[str, jax.Array]],
+        extra: Dict[str, jax.Array],
+        update: bool,
+    ):
         if isinstance(obs, Mapping):
             obs_img = obs["image"]
             hint = obs["hint"]
         else:
             obs_img = obs
             hint = None
-        # see if the problem specified a discount term
         gamma = extra.get("gamma", 1.0)
 
-        # possibly process the reward
         if self.reward_clip > 0:
             reward = jnp.clip(reward, -self.reward_clip, self.reward_clip)
 
@@ -355,7 +412,7 @@ class DRQN(NNAgent):
         scalars = self.encode_scalar_features(
             state.last_timestep["a"], reward, unbiased_reward_trace, hint
         )
-        last_carry = state.carry[0]
+        last_carry = self._carry_for_buffer(state.carry)
         state, a = self.act(state, obs_img, scalars)
 
         state.last_timestep.update(
@@ -367,12 +424,33 @@ class DRQN(NNAgent):
                 "reset": jnp.bool(False),
             }
         )
-        state = self._maybe_update_if_not_frozen(state)
-        state = self._decay_epsilon(state)
+        if update:
+            state = self._maybe_update_if_not_frozen(state)
+            state = self._decay_epsilon(state)
         return state, a
 
     @partial(jax.jit, static_argnums=0)
+    def _step_without_update(
+        self,
+        state: AgentState,
+        reward: jax.Array,
+        obs: Union[jax.Array, Dict[str, jax.Array]],
+        extra: Dict[str, jax.Array],
+    ):
+        return self._step_impl(state, reward, obs, extra, False)
+
+    @partial(jax.jit, static_argnums=0)
     def _end(self, state, reward: jax.Array, extra: Dict[str, jax.Array]):
+        return self._end_impl(state, reward, extra, True)
+
+    @partial(jax.jit, static_argnums=(0, 4))
+    def _end_impl(
+        self,
+        state: AgentState,
+        reward: jax.Array,
+        extra: Dict[str, jax.Array],
+        update: bool,
+    ):
         # possibly process the reward
         if self.reward_clip > 0:
             reward = jnp.clip(reward, -self.reward_clip, self.reward_clip)
@@ -386,6 +464,13 @@ class DRQN(NNAgent):
 
         state, _ = self._compute_reward_trace(state, reward)
 
-        state = self._maybe_update_if_not_frozen(state)
-        state = self._decay_epsilon(state)
+        if update:
+            state = self._maybe_update_if_not_frozen(state)
+            state = self._decay_epsilon(state)
         return state
+
+    @partial(jax.jit, static_argnums=0)
+    def _end_without_update(
+        self, state: AgentState, reward: jax.Array, extra: Dict[str, jax.Array]
+    ):
+        return self._end_impl(state, reward, extra, False)

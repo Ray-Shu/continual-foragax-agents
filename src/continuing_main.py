@@ -12,17 +12,18 @@ import socket
 import time
 import traceback
 from collections.abc import Mapping
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from gymnasium.utils.save_video import save_video
 from jax.tree_util import tree_map
-from jax_tqdm.scan_pbar import scan_tqdm
 from ml_instrumentation.Collector import Collector
 from ml_instrumentation.metadata import attach_metadata
 from ml_instrumentation.Sampler import Ignore
 from PyExpUtils.results.tools import getParamsAsDict
+from tqdm.auto import tqdm
 
 from environments.Foragax import Foragax
 from experiment import ExperimentModel
@@ -32,14 +33,39 @@ from utils.preempt import TimeoutHandler
 from utils.rlglue import RlGlue
 
 
-UNROLL = 4
+UNROLL = 1
 
 # ------------------
 # -- Command Args --
 # ------------------
+def parse_indices(index_specs: list[str], total: int | None = None) -> list[int]:
+    indices = []
+    for spec in index_specs:
+        if ":" not in spec:
+            indices.append(int(spec))
+            continue
+
+        parts = spec.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid index slice '{spec}', expected START:STOP")
+
+        start_s, stop_s = parts
+        start = int(start_s) if start_s else 0
+        if stop_s:
+            stop = int(stop_s)
+        elif total is not None:
+            stop = total
+        else:
+            raise ValueError(f"Open-ended index slice '{spec}' requires total runs")
+
+        indices.extend(range(start, stop))
+
+    return indices
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("-e", "--exp", type=str, required=True)
-parser.add_argument("-i", "--idxs", nargs="+", type=int, required=True)
+parser.add_argument("-i", "--idxs", nargs="+", type=str, required=True)
 parser.add_argument("--save_path", type=str, default="./")
 parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/")
 parser.add_argument("--silent", action="store_true", default=False)
@@ -71,7 +97,10 @@ if not prod:
 timeout_handler = TimeoutHandler()
 
 exp = ExperimentModel.load(args.exp)
-indices = args.idxs
+try:
+    indices = parse_indices(args.idxs, exp.numPermutations())
+except ValueError as e:
+    parser.error(str(e))
 
 Problem = getProblem(exp.problem)
 
@@ -150,15 +179,42 @@ def render(carry):
     )
 
 
-if len(glues) > 1:
+if hasattr(glues[0].agent, "_step_without_update"):
+    v_start = jax.vmap(glues[0]._start)
+    v_step = jax.vmap(glues[0]._step)
+    v_step_skip = jax.vmap(glues[0]._step_without_update)
+    v_update_agent = jax.vmap(glues[0].agent._update_state_with_metrics_if_can_sample)
+    v_advance_agent = jax.vmap(glues[0].agent._advance_update_clock)
+
+    @jax.jit
+    def v_step_no_update(state):
+        state, interaction = v_step_skip(state)
+        agent_state = v_advance_agent(state.agent_state)
+        state = replace(state, agent_state=agent_state)
+        return state, interaction
+
+    @jax.jit
+    def v_step_update(state):
+        state, interaction = v_step_skip(state)
+        agent_state = v_update_agent(state.agent_state)
+        state = replace(state, agent_state=agent_state)
+        agent_state = v_advance_agent(state.agent_state)
+        state = replace(state, agent_state=agent_state)
+        return state, interaction
+
+    v_render = jax.vmap(render)
+    use_explicit_update_steps = True
+elif len(glues) > 1:
     # vmap glue methods
     v_start = jax.vmap(glues[0]._start)
     v_step = jax.vmap(glues[0]._step)
     v_render = jax.vmap(render)
+    use_explicit_update_steps = False
 else:
     v_start = glues[0]._start
     v_step = glues[0]._step
     v_render = render
+    use_explicit_update_steps = False
 
 total_setup_time = time.time() - start_time
 num_indices = len(indices)
@@ -181,7 +237,7 @@ if not any(idx in video_idxs for idx in indices) and num_indices > 1:
 # --------------------
 
 start_step = None
-save_every = first_hypers.get("experiment", {}).get("save_every", 100_000)
+save_every = first_hypers.get("experiment", {}).get("save_every", 1_000_000)
 video_every = first_hypers.get("experiment", {}).get("video_every", save_every)
 datas = {}
 datas["rewards"] = np.empty((len(indices), n), dtype=np.float16)
@@ -272,6 +328,35 @@ else:
         return data
 
 
+initial_glue_states = [g.state for g in glues]
+loaded_checkpoints = [False] * len(indices)
+checkpoint_load_failed = False
+
+
+def reset_datas():
+    fresh_datas = {}
+    fresh_datas["rewards"] = np.empty((len(indices), n), dtype=np.float16)
+    fresh_datas["weight_change"] = np.empty((len(indices), n), dtype=np.float16)
+    fresh_datas["squared_td_error"] = np.empty((len(indices), n), dtype=np.float16)
+    fresh_datas["abs_td_error"] = np.empty((len(indices), n), dtype=np.float16)
+    fresh_datas["loss"] = np.empty((len(indices), n), dtype=np.float16)
+    if isinstance(glues[0].environment, Foragax):
+        fresh_datas["pos"] = np.empty((len(indices), n, 2), dtype=np.int32)
+        fresh_datas["biome_id"] = np.empty((len(indices), n), dtype=np.int32)
+        fresh_datas["biome_regret"] = np.empty((len(indices), n), dtype=np.float16)
+        fresh_datas["biome_rank"] = np.empty((len(indices), n), dtype=np.int32)
+        fresh_datas["object_collected_id"] = np.empty(
+            (len(indices), n), dtype=np.int32
+        )
+        fresh_datas["hint"] = np.full((len(indices), n), -1, dtype=np.int32)
+        if "Weather" in glues[0].environment.env.name:
+            fresh_datas["temperatures"] = np.empty(
+                (len(indices), n, len(glues[0].environment.env.objects)),
+                dtype=np.float16,
+            )
+    return fresh_datas
+
+
 for i, idx in enumerate(indices):
     context = exp.buildSaveContext(idx, base=args.checkpoint_path)
     step_path = context.resolve(f"{idx}/step.txt")
@@ -292,40 +377,32 @@ for i, idx in enumerate(indices):
                 with np.load(data_path) as data_idx:
                     for key in data_idx.keys():
                         datas[key][i, : len(data_idx[key])] = data_idx[key]
+                loaded_checkpoints[i] = True
             except Exception:
                 traceback.print_exc()
                 logger.warning(
                     f"Failed to load checkpoint for index {idx}, starting fresh"
                 )
                 start_step = None
-                datas = {}
-                datas["rewards"] = np.empty((len(indices), n), dtype=np.float16)
-                datas["weight_change"] = np.empty((len(indices), n), dtype=np.float16)
-                datas["squared_td_error"] = np.empty(
-                    (len(indices), n), dtype=np.float16
-                )
-                datas["abs_td_error"] = np.empty((len(indices), n), dtype=np.float16)
-                datas["loss"] = np.empty((len(indices), n), dtype=np.float16)
-                if isinstance(glues[0].environment, Foragax):
-                    datas["pos"] = np.empty((len(indices), n, 2), dtype=np.int32)
-                    datas["biome_id"] = np.empty((len(indices), n), dtype=np.int32)
-                    datas["biome_regret"] = np.empty(
-                        (len(indices), n), dtype=np.float16
-                    )
-                    datas["biome_rank"] = np.empty((len(indices), n), dtype=np.int32)
-                    datas["object_collected_id"] = np.empty(
-                        (len(indices), n), dtype=np.int32
-                    )
-                    datas["hint"] = np.full((len(indices), n), -1, dtype=np.int32)
-                    if "Weather" in glues[0].environment.env.name:
-                        datas["temperatures"] = np.empty(
-                            (len(indices), n, len(glues[0].environment.env.objects)),
-                            dtype=np.float16,
-                        )
+                checkpoint_load_failed = True
+                datas = reset_datas()
+
+if checkpoint_load_failed or (any(loaded_checkpoints) and not all(loaded_checkpoints)):
+    missing = [idx for idx, loaded in zip(indices, loaded_checkpoints) if not loaded]
+    logger.warning(
+        "Not all selected indices had valid checkpoints; starting the whole batch fresh. "
+        f"Missing checkpoint indices: {missing}"
+    )
+    start_step = None
+    for glue, initial_state in zip(glues, initial_glue_states):
+        glue.state = initial_state
+    datas = reset_datas()
 
 if len(glues) > 1:
     # combine states
     glue_states = tree_map(lambda *leaves: jnp.stack(leaves), *[g.state for g in glues])
+elif use_explicit_update_steps:
+    glue_states = tree_map(lambda leaf: jnp.expand_dims(leaf, 0), glues[0].state)
 else:
     glue_states = glues[0].state
 
@@ -336,6 +413,57 @@ else:
     logger.debug(f"Loaded checkpoints, resuming from step {start_step}")
 
 current_step = start_step
+training_pbar = tqdm(
+    total=n,
+    initial=current_step,
+    desc="Training",
+    unit="step",
+    disable=args.silent,
+)
+
+
+def update_training_progress(step_count):
+    step_count = int(step_count)
+    remaining = training_pbar.total - training_pbar.n
+    if remaining > 0:
+        training_pbar.update(min(step_count, remaining))
+
+
+def scan_progress(num_iters: int, unit_scale: int = 1):
+    if args.silent:
+        return lambda scan_fn: scan_fn
+
+    print_rate = max(min(num_iters // 100, 1000), 1)
+
+    def wrap(scan_fn):
+        def wrapped(carry, x):
+            result = scan_fn(carry, x)
+            iter_num = x[0] if isinstance(x, tuple) else x
+            next_iter = iter_num + 1
+            should_update = (next_iter % print_rate == 0) | (next_iter == num_iters)
+            iter_delta = jnp.where(
+                next_iter == num_iters,
+                ((num_iters - 1) % print_rate) + 1,
+                print_rate,
+            )
+            step_delta = iter_delta * unit_scale
+
+            def do_update(_):
+                jax.debug.callback(
+                    update_training_progress,
+                    step_delta,
+                    ordered=True,
+                )
+                return None
+
+            jax.lax.cond(should_update, do_update, lambda _: None, operand=None)
+            return result
+
+        return wrapped
+
+    return wrap
+
+
 while current_step < n:
     next_save = ((current_step // save_every) + 1) * save_every
     next_video = ((current_step // video_every) + 1) * video_every
@@ -354,11 +482,6 @@ while current_step < n:
         no_video_steps_count = steps_in_iter
         video_steps_count = 0
 
-    @scan_tqdm(
-        n,
-        print_rate=max(min(n // 20, 10000), 1),
-        initial=current_step + no_video_steps_count,
-    )
     def video_step(carry, _):
         frame = v_render(carry)
         carry, interaction = v_step(carry)
@@ -367,24 +490,108 @@ while current_step < n:
 
     data_chunk = None
     if no_video_steps_count > 0:
+        update_freq = int(first_hypers.get("update_freq", 1))
 
-        @scan_tqdm(n, print_rate=min(n // 20, 10000), initial=current_step)
         def step(carry, _):
             carry, interaction = v_step(carry)
             data = get_data(carry, interaction)
             return carry, data
 
-        no_video_steps = jnp.arange(no_video_steps_count)
-        glue_states, data_chunk = jax.lax.scan(
-            step, glue_states, no_video_steps, unroll=UNROLL
+        def no_update_step(carry, _):
+            carry, interaction = v_step_no_update(carry)
+            data = get_data(carry, interaction)
+            return carry, data
+
+        agent_step_count = int(np.asarray(glue_states.agent_state.steps).reshape(-1)[0])
+        freeze_steps = first_hypers.get("freeze_steps", np.inf)
+        if freeze_steps is None:
+            freeze_steps = np.inf
+        freeze_steps = float(freeze_steps)
+        can_use_explicit_steps = (
+            use_explicit_update_steps
+            and update_freq > 1
+            and agent_step_count + no_video_steps_count <= freeze_steps
         )
+
+        if can_use_explicit_steps:
+            data_chunks = []
+            steps_remaining = no_video_steps_count
+
+            steps_mod = agent_step_count % update_freq
+            prefix_count = min((update_freq - steps_mod) % update_freq, steps_remaining)
+            if prefix_count > 0:
+                prefix_step = scan_progress(prefix_count)(no_update_step)
+                glue_states, prefix_data = jax.lax.scan(
+                    prefix_step, glue_states, jnp.arange(prefix_count), unroll=UNROLL
+                )
+                data_chunks.append(prefix_data)
+                steps_remaining -= prefix_count
+
+            block_count = steps_remaining // update_freq
+            if block_count > 0:
+
+                def update_block(carry, _):
+                    carry, interaction = v_step_update(carry)
+                    update_data = get_data(carry, interaction)
+                    carry, skip_data = jax.lax.scan(
+                        no_update_step,
+                        carry,
+                        jnp.arange(update_freq - 1),
+                        unroll=UNROLL,
+                    )
+                    block_data = tree_map(
+                        lambda first, rest: jnp.concatenate(
+                            [jnp.expand_dims(first, 0), rest], axis=0
+                        ),
+                        update_data,
+                        skip_data,
+                    )
+                    return carry, block_data
+
+                glue_states, block_data = jax.lax.scan(
+                    scan_progress(block_count, unit_scale=update_freq)(update_block),
+                    glue_states,
+                    jnp.arange(block_count),
+                )
+                block_data = tree_map(
+                    lambda x: x.reshape((block_count * update_freq, *x.shape[2:])),
+                    block_data,
+                )
+                data_chunks.append(block_data)
+                steps_remaining -= block_count * update_freq
+
+            if steps_remaining > 0:
+                glue_states, tail_data = jax.lax.scan(
+                    scan_progress(steps_remaining)(no_update_step),
+                    glue_states,
+                    jnp.arange(steps_remaining),
+                    unroll=UNROLL,
+                )
+                data_chunks.append(tail_data)
+
+            data_chunk = (
+                data_chunks[0]
+                if len(data_chunks) == 1
+                else tree_map(lambda *xs: jnp.concatenate(xs, axis=0), *data_chunks)
+            )
+        else:
+            no_video_steps = jnp.arange(no_video_steps_count)
+            glue_states, data_chunk = jax.lax.scan(
+                scan_progress(no_video_steps_count)(step),
+                glue_states,
+                no_video_steps,
+                unroll=UNROLL,
+            )
 
     frames = None
     data_chunk_video = None
     if video_steps_count > 0:
         video_steps = jnp.arange(video_steps_count)
         glue_states, (data_chunk_video, frames) = jax.lax.scan(
-            video_step, glue_states, video_steps, unroll=UNROLL
+            scan_progress(video_steps_count)(video_step),
+            glue_states,
+            video_steps,
+            unroll=UNROLL,
         )
         if data_chunk is None:
             data_chunk = data_chunk_video
@@ -395,10 +602,12 @@ while current_step < n:
                 data_chunk_video,
             )
         frames = np.asarray(frames)
+        if len(glues) < 2 and use_explicit_update_steps:
+            frames = frames[:, 0]
 
     # checkpointing
     checkpoint_start_time = time.time()
-    if len(glues) < 2:
+    if len(glues) < 2 and not use_explicit_update_steps:
         data_chunk = tree_map(lambda x: np.expand_dims(x, 1), data_chunk)
 
     for i, idx in enumerate(indices):
@@ -420,7 +629,7 @@ while current_step < n:
             context.ensureExists(step_path_tmp, is_file=True)
 
             # Prepare checkpoint data
-            if len(glues) > 1:
+            if len(glues) > 1 or use_explicit_update_steps:
                 glue_state_idx = tree_map(lambda x: x[i], glue_states)
             else:
                 glue_state_idx = glue_states
@@ -479,6 +688,8 @@ while current_step < n:
     logger.debug(
         f"Checkpointed at {current_step + steps_in_iter} in {checkpoint_time:.4f}s"
     )
+
+training_pbar.close()
 
 # --------------------
 # -- Saving --

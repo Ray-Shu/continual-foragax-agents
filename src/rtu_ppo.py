@@ -3,6 +3,9 @@
 # Ensure third-party libraries that expect older JAX internals can import.
 # This sets a small compatibility alias if needed before importing distrax/tfp.
 import argparse
+import utils.jax_compat  # noqa: F401
+import socket
+import time
 import logging
 import os
 import socket
@@ -48,6 +51,31 @@ sys.path.insert(0, os.path.abspath("/tmp/src"))
 from foragax.registry import make
 
 PERIOD = 182500
+
+
+def parse_indices(index_specs: list[str], total: int | None = None) -> list[int]:
+    indices = []
+    for spec in index_specs:
+        if ":" not in spec:
+            indices.append(int(spec))
+            continue
+
+        parts = spec.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid index slice '{spec}', expected START:STOP")
+
+        start_s, stop_s = parts
+        start = int(start_s) if start_s else 0
+        if stop_s:
+            stop = int(stop_s)
+        elif total is not None:
+            stop = total
+        else:
+            raise ValueError(f"Open-ended index slice '{spec}' requires total runs")
+
+        indices.extend(range(start, stop))
+
+    return indices
 
 
 @struct.dataclass
@@ -115,7 +143,7 @@ class TrainConfig:
     sp_interval: int = -1
     shrink_factor: float = 1.0
     noise_scale: float = 0.0
-    
+
 class GymnaxEnvState(struct.PyTreeNode):
     to_render: bool = struct.field(pytree_node=True)
     cond_render: Callable = struct.field(pytree_node=False)
@@ -1179,7 +1207,7 @@ def experiment(rng, config: TrainConfig):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--exp", type=str, required=True)
-    parser.add_argument("-i", "--idxs", nargs="+", type=int, required=True)
+    parser.add_argument("-i", "--idxs", nargs="+", type=str, required=True)
     parser.add_argument("--save_path", type=str, default="./")
     parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/")
     parser.add_argument("--silent", action="store_true", default=False)
@@ -1209,8 +1237,11 @@ def main():
 
     exp = ExperimentModel.load(args.exp)
 
-    indices = args.idxs
-    allocate_frames = False
+    try:
+        indices = parse_indices(args.idxs, exp.numPermutations())
+    except ValueError as e:
+        parser.error(str(e))
+    allocate_frames = len(indices) == 1
 
     # --------------------
     # -- Batch Set-up --

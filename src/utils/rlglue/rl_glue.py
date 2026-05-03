@@ -64,6 +64,15 @@ class RlGlue:
 
     @partial(jax.jit, static_argnums=0)
     def _step(self, state: GlueState):
+        return self._step_with_agent_methods(state, self.agent._step, self.agent._end)
+
+    @partial(jax.jit, static_argnums=0)
+    def _step_without_update(self, state: GlueState):
+        return self._step_with_agent_methods(
+            state, self.agent._step_without_update, self.agent._end_without_update
+        )
+
+    def _step_with_agent_methods(self, state: GlueState, agent_step, agent_end):
         state.env_state, (s, reward, term, trunc, extra) = self.environment._step(
             state.env_state, state.last_action
         )
@@ -75,7 +84,7 @@ class RlGlue:
 
         def _end_step(_state, _s, _reward, _term, _trunc, _extra):
             _state.num_episodes += 1
-            _state.agent_state = self.agent._end(_state.agent_state, _reward, _extra)
+            _state.agent_state = agent_end(_state.agent_state, _reward, _extra)
             interaction = Interaction(
                 obs=_s,
                 action=jnp.full_like(_state.last_action, -1),
@@ -87,7 +96,7 @@ class RlGlue:
             return _state, interaction
 
         def _normal_step(_state, _s, _reward, _term, _trunc, _extra):
-            _state.agent_state, _state.last_action = self.agent._step(
+            _state.agent_state, _state.last_action = agent_step(
                 _state.agent_state, _reward, _s, _extra
             )
             interaction = Interaction(

@@ -364,6 +364,31 @@ class NNAgent(BaseAgent):
     @abstractmethod
     def _update(self, state: AgentState) -> Tuple[AgentState, Dict[str, jax.Array]]: ...
 
+    def _update_state_with_metrics(self, state: AgentState) -> AgentState:
+        new_state, metrics = self._update(state)
+        # Update the latest metrics in the state
+        metrics = Metrics(
+            weight_change=metrics.get("weight_change", state.metrics.weight_change),
+            abs_td_error=metrics.get("abs_td_error", state.metrics.abs_td_error),
+            squared_td_error=metrics.get(
+                "squared_td_error", state.metrics.squared_td_error
+            ),
+            loss=metrics.get("loss", state.metrics.loss),
+        )
+        return replace(new_state, metrics=metrics)
+
+    def _update_state_with_metrics_if_can_sample(self, state: AgentState) -> AgentState:
+        return jax.lax.cond(
+            self.buffer.can_sample(state.buffer_state),
+            self._update_state_with_metrics,
+            lambda s: s,
+            state,
+        )
+
+    def _advance_update_clock(self, state: AgentState) -> AgentState:
+        state = replace(state, steps=state.steps + 1)
+        return self._decay_epsilon(state)
+
     @partial(jax.jit, static_argnums=0)
     def _maybe_update_if_not_frozen(self, state: AgentState) -> AgentState:
         return jax.lax.cond(
@@ -375,32 +400,14 @@ class NNAgent(BaseAgent):
 
     @partial(jax.jit, static_argnums=0)
     def _maybe_update(self, state: AgentState) -> AgentState:
-        def do_update():
-            new_state, metrics = self._update(state)
-            # Update the latest metrics in the state
-            metrics = Metrics(
-                weight_change=metrics.get("weight_change", state.metrics.weight_change),
-                abs_td_error=metrics.get("abs_td_error", state.metrics.abs_td_error),
-                squared_td_error=metrics.get(
-                    "squared_td_error", state.metrics.squared_td_error
-                ),
-                loss=metrics.get("loss", state.metrics.loss),
-            )
-            new_state = replace(new_state, metrics=metrics)
-            return new_state
-
-        def no_update():
-            return state
-
         state = jax.lax.cond(
             (state.steps % state.hypers.update_freq == 0)
             & self.buffer.can_sample(state.buffer_state),
-            do_update,
-            no_update,
+            self._update_state_with_metrics,
+            lambda s: s,
+            state,
         )
-        state = replace(state, steps=state.steps + 1)
-        state = self._decay_epsilon(state)
-        return state
+        return self._advance_update_clock(state)
 
     @partial(jax.jit, static_argnums=0)
     def _decay_epsilon(self, state: AgentState):
@@ -514,6 +521,17 @@ class NNAgent(BaseAgent):
         obs: Union[jax.Array, Dict[str, jax.Array]],
         extra: Dict[str, jax.Array],
     ):
+        return self._step_impl(state, reward, obs, extra, True)
+
+    @partial(jax.jit, static_argnums=(0, 5))
+    def _step_impl(
+        self,
+        state: AgentState,
+        reward: jax.Array,
+        obs: Union[jax.Array, Dict[str, jax.Array]],
+        extra: Dict[str, jax.Array],
+        update: bool,
+    ):
         if isinstance(obs, Mapping):
             obs_img = obs["image"]
             hint = obs["hint"]
@@ -536,10 +554,8 @@ class NNAgent(BaseAgent):
         )
         state, a = self.act(state, obs_img, scalars)
 
-        # see if the problem specified a discount term
         gamma = extra.get("gamma", 1.0)
 
-        # possibly process the reward
         if self.reward_clip > 0:
             reward = jnp.clip(reward, -self.reward_clip, self.reward_clip)
         if self.reward_scale is not None:
@@ -563,14 +579,35 @@ class NNAgent(BaseAgent):
                 "a": a,
             }
         )
-        state = self._maybe_update_if_not_frozen(state)
+        if update:
+            state = self._maybe_update_if_not_frozen(state)
         return state, a
+
+    @partial(jax.jit, static_argnums=0)
+    def _step_without_update(
+        self,
+        state: AgentState,
+        reward: jax.Array,
+        obs: Union[jax.Array, Dict[str, jax.Array]],
+        extra: Dict[str, jax.Array],
+    ):
+        return self._step_impl(state, reward, obs, extra, False)
 
     def end(self, reward: jax.Array, extra: Dict[str, jax.Array]):
         self.state = self._end(self.state, reward, extra)
 
     @partial(jax.jit, static_argnums=0)
     def _end(self, state, reward: jax.Array, extra: Dict[str, jax.Array]):
+        return self._end_impl(state, reward, extra, True)
+
+    @partial(jax.jit, static_argnums=(0, 4))
+    def _end_impl(
+        self,
+        state: AgentState,
+        reward: jax.Array,
+        extra: Dict[str, jax.Array],
+        update: bool,
+    ):
         # possibly process the reward
         if self.reward_clip > 0:
             reward = jnp.clip(reward, -self.reward_clip, self.reward_clip)
@@ -590,5 +627,12 @@ class NNAgent(BaseAgent):
         )
         buffer_state = self.buffer.add(state.buffer_state, batch_sequence)
         state = replace(state, buffer_state=buffer_state)
-        state = self._maybe_update_if_not_frozen(state)
+        if update:
+            state = self._maybe_update_if_not_frozen(state)
         return state
+
+    @partial(jax.jit, static_argnums=0)
+    def _end_without_update(
+        self, state: AgentState, reward: jax.Array, extra: Dict[str, jax.Array]
+    ):
+        return self._end_impl(state, reward, extra, False)
