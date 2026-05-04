@@ -237,7 +237,7 @@ if not any(idx in video_idxs for idx in indices) and num_indices > 1:
 # --------------------
 
 start_step = None
-save_every = first_hypers.get("experiment", {}).get("save_every", 1_000_000)
+save_every = first_hypers.get("experiment", {}).get("save_every", 10_001_000)
 video_every = first_hypers.get("experiment", {}).get("video_every", save_every)
 datas = {}
 datas["rewards"] = np.empty((len(indices), n), dtype=np.float16)
@@ -606,7 +606,6 @@ while current_step < n:
             frames = frames[:, 0]
 
     # checkpointing
-    checkpoint_start_time = time.time()
     if len(glues) < 2 and not use_explicit_update_steps:
         data_chunk = tree_map(lambda x: np.expand_dims(x, 1), data_chunk)
 
@@ -615,7 +614,8 @@ while current_step < n:
         for key in datas:
             datas[key][i, current_step : current_step + steps_in_iter] = data_idx[key]
 
-        if next_milestone % save_every == 0 or next_milestone == n:
+        if next_milestone % save_every == 0 and next_milestone < n:
+            checkpoint_start_time = time.time()
             context = exp.buildSaveContext(idx, base=args.checkpoint_path)
 
             # Write to temporary files first for atomic checkpointing
@@ -653,6 +653,10 @@ while current_step < n:
             os.rename(glue_state_path_tmp, final_glue_state_path)
             os.rename(data_path_tmp, final_data_path)
             os.rename(step_path_tmp, final_step_path)
+            checkpoint_time = time.time() - checkpoint_start_time
+            logger.debug(
+                f"Checkpointed {idx} at {next_milestone} in {checkpoint_time:.4f}s"
+            )
 
         # Save video
         if (
@@ -684,10 +688,6 @@ while current_step < n:
     if "data_chunk_video" in locals():
         del data_chunk_video
     gc.collect()
-    checkpoint_time = time.time() - checkpoint_start_time
-    logger.debug(
-        f"Checkpointed at {current_step + steps_in_iter} in {checkpoint_time:.4f}s"
-    )
 
 training_pbar.close()
 

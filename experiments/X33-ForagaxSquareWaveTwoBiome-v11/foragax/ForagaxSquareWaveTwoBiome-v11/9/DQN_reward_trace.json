@@ -33,7 +33,7 @@
             "layers": 2,
             "conv": "None",
             "use_layernorm": true,
-            "scalar_features": "reward_trace"
+            "scalar_features": "hint,last_action,last_reward,reward_trace"
         },
         "update_freq": 4
     }

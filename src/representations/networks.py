@@ -1252,8 +1252,6 @@ class ForagerRTUNetReLU(hk.Module):
                 layers.append(jax.nn.relu)
             self.pre_core_mlp = hk.Sequential(layers)
 
-        self.rtu = RTU(hidden=hidden, d_hidden=d_hidden, name='rtu')
-
         if self.post_core_layers > 0:
             layers = []
             for _ in range(self.post_core_layers):
@@ -1332,7 +1330,8 @@ class ForagerRTUNetReLU(hk.Module):
             if self.pre_core_layers > 0:
                 gru_in = self.pre_core_mlp(gru_in)
 
-            gru_out, states_sequence, initial_carry = self.rtu(
+            rtu = RTU(hidden=gru_in.shape[-1], d_hidden=self.d_hidden, name="rtu")
+            gru_out, states_sequence, initial_carry = rtu(
                 gru_in, reset, carry, is_target=is_target
             )
 
@@ -1342,18 +1341,23 @@ class ForagerRTUNetReLU(hk.Module):
                 parts.append(other)
             outputs_sequence = jnp.concatenate(parts, axis=-1)
         else:
-            # Standard: concat all then GRU on everything
-            if self.scalars > 0:
-                assert scalars is not None
-                h = jnp.concatenate([h, scalars], axis=-1)
-
             if self.pre_core_layers > 0:
                 h = self.pre_core_mlp(h)
 
-            outputs_sequence, states_sequence, initial_carry = self.rtu(
-                h, reset, carry, is_target=is_target
+            # Standard: concat scalars immediately before the recurrent core.
+            if self.scalars > 0:
+                assert scalars is not None
+                core_in = jnp.concatenate([h, scalars], axis=-1)
+            else:
+                core_in = h
+
+            rtu = RTU(hidden=core_in.shape[-1], d_hidden=self.d_hidden, name="rtu")
+            outputs_sequence, states_sequence, initial_carry = rtu(
+                core_in, reset, carry, is_target=is_target
             )
-            outputs_sequence = jnp.concatenate([outputs_sequence[:, None], h], axis=-1)
+            outputs_sequence = jnp.concatenate(
+                [outputs_sequence[:, None], core_in], axis=-1
+            )
 
         if self.post_core_layers > 0:
             outputs_sequence = self.post_core_mlp(outputs_sequence)
@@ -1689,17 +1693,8 @@ class ForagerNet(hk.Module):
                 scalars_proj.append(self.activation_fn)
                 self.scalars_proj = hk.Sequential(scalars_proj)
 
-        if self.layers > 0:
+        def make_mlp(widths):
             mlp_layers = []
-            widths = (
-                [self.hidden] * layers
-                if layers is not None
-                else (
-                    [self.hidden] * self.pre_core_layers
-                    + [self.d_hidden] * self.core_layers
-                    + [self.hidden] * self.post_core_layers
-                )
-            )
             for width in widths:
                 mlp_layers.append(hk.Linear(width, w_init=w_init))
                 if use_layernorm:
@@ -1707,7 +1702,17 @@ class ForagerNet(hk.Module):
                         hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                     )
                 mlp_layers.append(self.activation_fn)
-            self.mlp = hk.Sequential(mlp_layers)
+            return hk.Sequential(mlp_layers)
+
+        if layers is not None:
+            self.core_mlp = make_mlp([self.hidden] * layers)
+        else:
+            if self.pre_core_layers > 0:
+                self.pre_core_mlp = make_mlp([self.hidden] * self.pre_core_layers)
+            if self.core_layers > 0:
+                self.core_mlp = make_mlp([self.d_hidden] * self.core_layers)
+            if self.post_core_layers > 0:
+                self.post_core_mlp = make_mlp([self.hidden] * self.post_core_layers)
 
         self.phi = hk.Flatten(preserve_dims=1, name="phi")
 
@@ -1742,21 +1747,25 @@ class ForagerNet(hk.Module):
 
         if self.balanced:
             h = self.vision_proj(h)
-            parts = [h]
-            if self.scalars > 0:
-                if scalars is not None:
-                    parts.append(self.scalars_proj(scalars))
-                else:
-                    parts.append(jnp.zeros(x.shape[:-3] + (self.hidden,)))
-            h = jnp.concatenate(parts, axis=-1)
-        else:
-            if self.scalars > 0:
-                if scalars is None:
-                    scalars = jnp.zeros(x.shape[:-3] + (self.scalars,))
-                h = jnp.concatenate([h, scalars], axis=-1)
 
-        if self.layers > 0:
-            h = self.mlp(h)
+        if self.pre_core_layers > 0 and hasattr(self, "pre_core_mlp"):
+            h = self.pre_core_mlp(h)
+
+        if self.scalars > 0:
+            if self.balanced:
+                if scalars is not None:
+                    scalars = self.scalars_proj(scalars)
+                else:
+                    scalars = jnp.zeros(x.shape[:-3] + (self.hidden,))
+            elif scalars is None:
+                scalars = jnp.zeros(x.shape[:-3] + (self.scalars,))
+            h = jnp.concatenate([h, scalars], axis=-1)
+
+        if hasattr(self, "core_mlp"):
+            h = self.core_mlp(h)
+
+        if self.post_core_layers > 0 and hasattr(self, "post_core_mlp"):
+            h = self.post_core_mlp(h)
 
         out = self.phi(h)
 

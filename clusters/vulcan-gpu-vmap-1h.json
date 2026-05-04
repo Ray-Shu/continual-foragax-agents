@@ -7,6 +7,6 @@
     "cores": 1,
     "mem_per_core": "64G",
     "sequential": 1,
-    "tasks_per_core": 150,
-    "tasks_per_vmap": 150
+    "tasks_per_core": 300,
+    "tasks_per_vmap": 300
 }

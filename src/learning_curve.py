@@ -814,30 +814,7 @@ def main():
             else:
                 ax = axes[i] if num_metrics > 1 else axes[0]
 
-            # Configure lineplot based on whether to show all seeds or confidence intervals
-            lineplot_kwargs = {
-                "data": df.to_pandas(),
-                "x": "frame",
-                "y": metric,
-                "hue": hue_col,
-                "hue_order": hue_order,
-                "palette": palette,
-                "ax": ax,
-                "legend": False,
-            }
-
-            if args.plot_all_seeds:
-                # Plot each seed as a separate line
-                lineplot_kwargs["units"] = "seed"
-                lineplot_kwargs["estimator"] = None
-                lineplot_kwargs["alpha"] = 0.05  # Make individual lines semi-transparent
-            else:
-                # Plot mean with confidence intervals
-                lineplot_kwargs["errorbar"] = ("ci", 95)
-
-            sns.lineplot(**lineplot_kwargs)
-
-            # Formatting
+            # Formatting label shared by curve and bar plots.
             formatted_metric = format_metric_name(metric)
             ylabel_map = get_ylabel_mapping(env)
             ylabel = ylabel_map.get(formatted_metric, formatted_metric)
@@ -846,17 +823,6 @@ def main():
 
             if args.normalize:
                 ylabel = f"Normalized {ylabel}"
-            ax.set_ylabel(ylabel)
-            if i == num_metrics - 1:  # Only set x-label on the last subplot
-                ax.set_xlabel(r"Time steps $(\times 10^6)$")
-            else:
-                ax.set_xlabel("")  # Remove x-label for non-last subplots
-            ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
-            ax.xaxis.set_major_formatter(
-                ticker.FuncFormatter(lambda x, _: f"{x / 1000000:g}")
-            )
-            ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=4))
-            despine(ax)
 
             if not args.plot_bar_only:
                 # Set up data for lineplot
