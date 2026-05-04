@@ -180,9 +180,11 @@ class DQN_ReDo(DQN):
 
     @partial(jax.jit, static_argnums=0)
     def _maybe_update(self, state: AgentState) -> AgentState:
+        prev_updates = state.updates
         state = super()._maybe_update(state)
         do_redo = (
-            (state.updates > 0)
+            (state.updates != prev_updates)
+            & (state.updates > 0)
             & (state.updates % state.hypers.redo_freq == 0)
             & self.buffer.can_sample(state.buffer_state)
         )
