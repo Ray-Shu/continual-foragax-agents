@@ -39,7 +39,7 @@
         },
         "representation": {
             "type": "ForagerNet",
-            "hidden": 32,
+            "hidden": 64,
             "layers": 2,
             "conv": "None",
             "use_layernorm": true
