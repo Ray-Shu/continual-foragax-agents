@@ -1343,7 +1343,7 @@ class ForagerNet(hk.Module):
                         hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                     )
                 mlp_layers.append(jax.nn.relu)
-            self.mlp = hk.Sequential(mlp_layers)
+            self.mlp = hku.accumulatingSequence(mlp_layers)
 
         self.phi = hk.Flatten(preserve_dims=1, name="phi")
 
@@ -1391,12 +1391,17 @@ class ForagerNet(hk.Module):
                     scalars = jnp.zeros(x.shape[:-3] + (self.scalars,))
                 h = jnp.concatenate([h, scalars], axis=-1)
 
+        mlp_acts: Dict[str, jnp.ndarray] = {}
         if self.layers > 0:
-            h = self.mlp(h)
+            mlp_out = self.mlp(h)
+            h = mlp_out.out
+            mlp_acts = mlp_out.activations
 
         out = self.phi(h)
 
-        return hku.AccumulatedOutput(activations={self.name: out}, out=out)
+        return hku.AccumulatedOutput(
+            activations={self.name: out, **mlp_acts}, out=out
+        )
 
 
 def make_standalone_initializer(hk_initializer) -> Callable:

@@ -63,7 +63,7 @@ class Hypers(BaseHypers):
 @cxu.dataclass
 class AgentState(BaseAgentState):
     params: Any
-    optim: Dict[str, optax.OptState]
+    optim: optax.OptState
     buffer_state: Any
     key: jax.Array
     last_timestep: Dict[str, jax.Array]
