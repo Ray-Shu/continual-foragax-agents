@@ -42,7 +42,7 @@
             "preactivation_layer_norm": true
         },
         "update_freq": 4,
-        "redo_freq": 10000,
+        "redo_freq": 2500,
         "redo_threshold": 0.025,
         "redo_reset_layernorm": true
     }
