@@ -38,7 +38,8 @@
             "hidden": 64,
             "layers": 2,
             "conv": "None",
-            "use_layernorm": true
+            "use_layernorm": true,
+            "preactivation_layer_norm": false
         },
         "update_freq": 4,
         "redo_freq": 10000,

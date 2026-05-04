@@ -1,14 +1,10 @@
 {
-    "agent": "DQN_ReDo",
+    "agent": "DQN_ReDo_PreActLN",
     "problem": "Foragax",
-    "total_steps": 1000000,
+    "total_steps": 10000000,
     "episode_cutoff": -1,
     "metaParameters": {
-        "epsilon": [
-            0.05,
-            0.1,
-            0.25
-        ],
+        "epsilon": 0.05,
         "use_past_action": true,
         "use_past_reward": true,
         "target_refresh": 128,
@@ -21,7 +17,7 @@
 			"observation_type": "color"
         },
         "experiment": {
-            "seed_offset": 1000000
+            "seed_offset": 0
         },
         "gamma": 0.99,
         "optimizer": {
@@ -43,14 +39,11 @@
             "layers": 2,
             "conv": "None",
             "use_layernorm": true,
-            "preactivation_layer_norm": false
+            "preactivation_layer_norm": true
         },
         "update_freq": 4,
         "redo_freq": 10000,
-        "redo_threshold": [
-            0.025,
-            0.1
-        ],
+        "redo_threshold": 0.025,
         "redo_reset_layernorm": true
     }
 }

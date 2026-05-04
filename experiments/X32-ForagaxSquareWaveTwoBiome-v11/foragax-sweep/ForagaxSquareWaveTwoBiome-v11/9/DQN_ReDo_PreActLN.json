@@ -1,5 +1,5 @@
 {
-    "agent": "DQN_ReDo",
+    "agent": "DQN_ReDo_PreActLN",
     "problem": "Foragax",
     "total_steps": 1000000,
     "episode_cutoff": -1,
@@ -43,7 +43,7 @@
             "layers": 2,
             "conv": "None",
             "use_layernorm": true,
-            "preactivation_layer_norm": false
+            "preactivation_layer_norm": true
         },
         "update_freq": 4,
         "redo_freq": 10000,
