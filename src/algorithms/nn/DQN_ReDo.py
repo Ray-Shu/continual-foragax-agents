@@ -72,6 +72,12 @@ class DQN_ReDo(DQN):
             hypers=hypers,
         )
 
+        adam_state = self.state.optim[0]  # type: ignore
+        assert isinstance(adam_state, optax.ScaleByAdamState), (
+            "DQN_ReDo expects an Adam-based optimizer chain whose first element "
+            f"is optax.ScaleByAdamState; got {type(adam_state).__name__}."
+        )
+
     def _score(self, activation: jax.Array) -> jax.Array:
         reduce_axes = tuple(range(activation.ndim - 1))
         mean_activation = jnp.mean(jnp.abs(activation), axis=reduce_axes)
