@@ -229,6 +229,7 @@ def buildFeatureNetwork(inputs: Tuple, params: Dict[str, Any], rng: Any):
                 scalars=params["scalars"],
                 layers=params.get("layers", 0),
                 use_layernorm=params.get("use_layernorm", False),
+                preactivation_layer_norm=params.get("preactivation_layer_norm", True),
                 balanced=params.get("balanced", False),
                 name="phi",
                 conv=params.get("conv", "Conv2D"),
@@ -1278,6 +1279,7 @@ class ForagerNet(hk.Module):
         scalars: int = 0,
         layers: int = 0,
         use_layernorm=False,
+        preactivation_layer_norm: bool = True,
         balanced=False,
         name: str = "",
         conv: str = "Conv2D",
@@ -1289,6 +1291,7 @@ class ForagerNet(hk.Module):
         self.scalars = scalars
         self.layers = layers
         self.use_layernorm = use_layernorm
+        self.preactivation_layer_norm = preactivation_layer_norm
         self.balanced = balanced
         self.coord_conv = coord
         w_init = hk.initializers.Orthogonal(np.sqrt(2))
@@ -1338,11 +1341,15 @@ class ForagerNet(hk.Module):
             mlp_layers = []
             for _ in range(layers):
                 mlp_layers.append(hk.Linear(self.hidden, w_init=w_init))
-                if use_layernorm:
+                if use_layernorm and self.preactivation_layer_norm:
                     mlp_layers.append(
                         hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                     )
                 mlp_layers.append(jax.nn.relu)
+                if use_layernorm and not self.preactivation_layer_norm:
+                    mlp_layers.append(
+                        hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
+                    )
             self.mlp = hku.accumulatingSequence(mlp_layers)
 
         self.phi = hk.Flatten(preserve_dims=1, name="phi")
