@@ -1,6 +1,6 @@
 python src/learning_curve.py experiments/E136-big/foragax/ForagaxBig-v5 --plot-name ForagaxBig-v5-learning-curve --filter-alg-apertures PPO_LN_128:9 PPO-RTU_LN_128:9 Search-Oracle --metric ewm_reward_5
 python src/learning_bar.py experiments/E136-big/foragax/ForagaxBig-v5 --plot-name ForagaxBig-v5-bar-plot --filter-alg-apertures PPO_LN_128:9 PPO-RTU_LN_128:9 Search-Oracle --metric ewm_reward_5
-python src/learning_curve.py experiments/E136-big/foragax/ForagaxBig-v5 --plot-name ForagaxBig-v5-learning-curve-dqn --filter-alg-apertures DQN_LN:9 DQN_LN_RT:9 Search-Oracle --metric ewm_reward_5
-python src/learning_bar.py experiments/E136-big/foragax/ForagaxBig-v5 --plot-name ForagaxBig-v5-bar-plot-dqn --filter-alg-apertures DQN_LN:9 DQN_LN_RT:9 Search-Oracle --metric ewm_reward_5
+python src/learning_curve.py experiments/E136-big/foragax/ForagaxBig-v5 --plot-name ForagaxBig-v5-learning-curve-dqn --filter-alg-apertures DQN_LN:9 DQN_LN_RT:9 PPO-RTU_LN_128:9 Search-Oracle --metric ewm_reward_5
+python src/learning_bar.py experiments/E136-big/foragax/ForagaxBig-v5 --plot-name ForagaxBig-v5-bar-plot-dqn --filter-alg-apertures DQN_LN:9 DQN_LN_RT:9 PPO-RTU_LN_128:9 Search-Oracle --metric ewm_reward_5
 python src/learning_curve.py experiments/E136-big/foragax/ForagaxBig-v5 --plot-name ForagaxBig-v5-learning-curve-ppo --filter-alg-apertures PPO_LN_128:9 PPO_LN_RT_128:9 PPO-RTU_LN_128:9 Search-Oracle --metric ewm_reward_5
 python src/learning_bar.py experiments/E136-big/foragax/ForagaxBig-v5 --plot-name ForagaxBig-v5-bar-plot-ppo --filter-alg-apertures PPO_LN_128:9 PPO_LN_RT_128:9 PPO-RTU_LN_128:9 Search-Oracle --metric ewm_reward_5
