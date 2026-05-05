@@ -82,6 +82,9 @@ class DQN_ReDo(DQN):
         self._reset_ln = bool(params.get("redo_reset_layernorm", True))
         self._use_ln = bool(self.rep_params.get("use_layernorm", False))
         self._preact_ln = bool(self.rep_params.get("preactivation_layer_norm", True))
+        # Observe-only mode: compute dormancy fractions but skip the param/optim
+        # recycle. Lets us instrument vanilla DQN with the same logging path.
+        self._redo_apply = bool(params.get("redo_apply", True))
 
         self._stage_plan: List[Dict[str, object]] = []
         linear_idx = 0
@@ -298,6 +301,10 @@ class DQN_ReDo(DQN):
                 "post_core", state.metrics.dormancy_post_core
             ),
         )
+
+        if not self._redo_apply:
+            # Observe-only: keep params/optim untouched, just publish dormancy.
+            return replace(state, key=key, metrics=new_metrics)
 
         return replace(
             state, key=key, params=new_params, optim=new_optim, metrics=new_metrics
