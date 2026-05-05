@@ -63,11 +63,15 @@ class DQN_Shrink_and_Perturb(DQN):
     def _shrink_and_perturb(self, state: AgentState):
         key, subkey = jax.random.split(state.key)
 
-        def sp(p):
-            noise = jax.random.normal(subkey, shape=p.shape, dtype=p.dtype)
+        leaves, treedef = jax.tree_util.tree_flatten(state.params)
+        leaf_keys = jax.random.split(subkey, len(leaves))
+        keys_tree = jax.tree_util.tree_unflatten(treedef, leaf_keys)
+
+        def sp(k, p):
+            noise = jax.random.normal(k, shape=p.shape, dtype=p.dtype)
             return p * state.hypers.shrink_factor + noise * state.hypers.noise_scale
 
-        params = jax.tree_util.tree_map(sp, state.params)
+        params = jax.tree_util.tree_map(sp, keys_tree, state.params)
 
         optimizer = self._build_optimizer(state.hypers.optimizer, state.hypers.swr)
         optim = optimizer.init(params)
