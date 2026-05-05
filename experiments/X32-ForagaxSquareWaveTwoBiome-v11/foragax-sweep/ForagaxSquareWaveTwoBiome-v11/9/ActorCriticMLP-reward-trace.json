@@ -35,7 +35,7 @@
                 1e-4
             ],
             "beta1": 0.9,
-            "beta2": [0.999, 0.9],
+            "beta2": 0.999,
             "eps": 1e-5
         },
         "optimizer_critic": {
@@ -46,7 +46,7 @@
                 0.1
             ],
             "beta1": 0.9,
-            "beta2": [0.999, 0.9],
+            "beta2": 0.999,
             "eps": 1e-5
         },
         "representation": {

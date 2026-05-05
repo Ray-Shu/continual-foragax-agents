@@ -63,24 +63,28 @@ LABEL_MAP: Dict[str, str] = {
     "PPO_L2": "PPO (L2)",
     "ActorCriticMLP": "PPO",
     "ActorCriticMLP-l2": "PPO (L2)",
+    "ActorCriticMLP-l2-init": "PPO (L2 Init)",
     "ActorCriticMLP-world": "PPO (World)",
+    "ActorCriticMLP-reward-trace": "PPO Simple Memory",
+    "ActorCriticMLP-reset": "PPO (Head Reset)",
+    "ActorCriticMLP-shrink-and-perturb": "PPO (S&P)",
     "RealTimeActorCriticMLP": "RTU-PPO",
     "RealTimeActorCriticMLP-l2": "RTU-PPO (L2)",
     "PPO-RTU": "RTU-PPO",
     "PPO-RTU_128": "RTU-PPO",
     "PPO-RTU_L2": "RTU-PPO (L2)",
-    "PPO-RTU_LN_128": "RTU-PPO",
-    "PPO-RTU_LN_HINT_128": "RTU-PPO (CA)",
-    "PPO-RTU_LN_128_512": "RTU (LN, H512)",
-    "RealTimeActorCriticMLP-world": "RTU (World)",
+    "PPO-RTU_LN_128": "RTU-PPO (LN)",
+    "PPO-RTU_LN_128_512": "RTU-PPO (LN, H512)",
+    "RealTimeActorCriticMLP-world": "RTU-PPO (World)",
     "DQN": "DQN",
     "DQN_CReLU": "DQN (CReLU)",
     "DQN_L2": "DQN (L2)",
     "DQN_L2_Init": "DQN (L2 Init)",
-    "DQN_LN": "DQN",
+    "DQN_LN": "DQN (LN)",
+    "DQN_reward_trace": "DQN Simple Memory",
     "DQN_Reset_Head": "DQN (Head Reset)",
     "DQN_Hare_and_Tortoise": "DQN (Hare & Tortoise)",
-    "DQN_Shrink_and_Perturb": "DQN (Shrink & Perturb)",
+    "DQN_Shrink_and_Perturb": "DQN (S&P)",
     "DQN_privileged": "DQN (Privileged)",
     "DQN_world": "DQN (World)",
     "DQN_LN_RT": "DQN (LN, RT)",
@@ -89,9 +93,8 @@ LABEL_MAP: Dict[str, str] = {
     "DRQN_1_1": "DRQN (1-1)",
     "DRQN_LN_0_2": "DRQN (LN, 0-2)",
     "DRQN_0_2": "DRQN (0-2)",
-    "DQN_reward_trace": "DQN (RT)",
-    "ActorCriticMLP-reward-trace": "PPO (RT)",
-    "DQN_LN_HINT": "DQN (CA)",
+    "DRQN": "DRQN",
+    "PT_DQN": "PT DQN",
     "Search-Brown": "Search (Brown)",
     "Search-Brown-Avoid-Green": "Search (+B-G)",
     "Search-Morel": "Search (Morel)",
@@ -105,13 +108,13 @@ LABEL_MAP: Dict[str, str] = {
 frozen_label_map = {}
 for key in list(LABEL_MAP.keys()):
     frozen_label_map[f"{key}_greedy_frozen_5M"] = (
-        f"{LABEL_MAP[key]} (Greedy Frozen @ 5 M)"
+        f"{LABEL_MAP[key]} (5M)"
     )
     frozen_label_map[f"{key}_greedy_frozen_1M"] = (
-        f"{LABEL_MAP[key]} (Greedy Frozen @ 1 M)"
+        f"{LABEL_MAP[key]} (1M)"
     )
-    frozen_label_map[f"{key}_frozen_1M"] = f"{LABEL_MAP[key]} (Frozen @ 1 M)"
-    frozen_label_map[f"{key}_frozen_5M"] = f"{LABEL_MAP[key]} (Frozen @ 5 M)"
+    frozen_label_map[f"{key}_frozen_1M"] = f"{LABEL_MAP[key]} (1M)"
+    frozen_label_map[f"{key}_frozen_5M"] = f"{LABEL_MAP[key]} (F)"
 LABEL_MAP.update(frozen_label_map)
 
 
@@ -293,6 +296,9 @@ class PlottingArgumentParser(argparse.ArgumentParser):
             "--save-type", type=str, default="pdf", help="File format for saving plots"
         )
         self.add_argument(
+            "--font-size", type=int, default=FONTSIZE, help="Font size for the plot."
+        )
+        self.add_argument(
             "--plot-name", type=str, default=None, help="Custom plot name"
         )
         self.add_argument(
@@ -315,6 +321,17 @@ def parse_plotting_args(parser: PlottingArgumentParser) -> argparse.Namespace:
     """Parses and returns common plotting arguments."""
     args = parser.parse_args()
     args.experiment_path = Path(args.path).resolve()
+
+    # Update matplotlib font sizes with chosen font size
+    if hasattr(args, "font_size"):
+        plt.rcParams.update({
+            "axes.labelsize": args.font_size,
+            "xtick.labelsize": args.font_size,
+            "ytick.labelsize": args.font_size,
+            "font.size": args.font_size,
+            "legend.fontsize": args.font_size,
+        })
+
     return args
 
 
@@ -351,20 +368,25 @@ def format_metric_name(metric: str) -> str:
     return metric.replace("_", " ").title()
 
 
-def get_mapped_label(label: str, label_map: Optional[Dict[str, str]] = None) -> str:
+def get_mapped_label(label: str, label_map: Optional[Dict[str, str]] = None, disable_fov: bool = False) -> str:
     """Get the mapped label, handling apertures and frozen variants."""
     if label_map and label in label_map:
         return label_map[label]
     if ":" in label:
         alg, aperture = label.split(":", 1)
         base_label = label_map.get(alg, alg) if label_map else alg
-        if "Frozen" in base_label:
+        if "frozen" in base_label.lower():
             # For frozen variants, put FOV inline with DQN and Frozen on new line
             dqn_part = base_label.split(" (")[0]
             frozen_part = base_label.split(" (", 1)[1]
-            return f"{dqn_part} "#" (FOV {aperture})\n({frozen_part}"
+            if disable_fov:
+                return f"{dqn_part}\n({frozen_part}"
+            else:
+                return f"{dqn_part} (FOV {aperture})\n({frozen_part}"
         else:
-            return f"{base_label}" # (FOV {aperture})"
+            if disable_fov:
+                return base_label
+            return f"{base_label} (FOV {aperture})"
     return label
 
 

@@ -6,8 +6,7 @@
         "environment": {
             "env_id": "ForagaxSquareWaveTwoBiome-v11",
             "aperture_size": 9,
-            "random_shift_max_steps": 10000000,
-            "observation_type": "rgb"
+            "observation_type": "color"
         },
         "experiment": {
             "seed_offset": 0
@@ -23,24 +22,25 @@
         "gradient_clipping": true,
         "max_grad_norm": 0.5,
         "vf_coef": 0.5,
-        "entropy_coef": 0.1,
+        "entropy_coef": 0.01,
         "optimizer_actor": {
             "name": "Adam",
-            "alpha": 0.0003,
+            "alpha": 0.001,
             "beta1": 0.9,
-            "beta2": 0.9,
+            "beta2": 0.999,
             "eps": 1e-05
         },
         "optimizer_critic": {
             "name": "Adam",
-            "lr_scale": 1.0,
+            "lr_scale": 0.1,
             "beta1": 0.9,
             "beta2": 0.999,
             "eps": 1e-05
         },
         "representation": {
             "hidden": 64,
-            "d_hidden": 256
+            "d_hidden": 256,
+            "use_layernorm": true
         }
     }
 }

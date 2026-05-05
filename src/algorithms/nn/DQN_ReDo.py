@@ -1,6 +1,6 @@
 from dataclasses import replace
 from functools import partial
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import jax
 import jax.lax
@@ -42,24 +42,102 @@ class DQN_ReDo(DQN):
         rep_type = self.rep_params["type"]
         if rep_type != "ForagerNet":
             raise NotImplementedError(
-                f"DQN_ReDo only supports ForagerNet (conv='None', layers=2). "
-                f"Got {rep_type!r}."
+                f"DQN_ReDo only supports ForagerNet. Got {rep_type!r}."
             )
         if self.rep_params.get("conv", "Conv2D") != "None":
             raise NotImplementedError(
                 f"DQN_ReDo on ForagerNet only supports conv='None'; "
                 f"got conv={self.rep_params.get('conv')!r}."
             )
-        if self.rep_params.get("layers", 0) != 2:
+
+        # New schema (pre_core/core/post_core) is required. The legacy
+        # ``layers`` knob is still supported by ForagerNet but DQN_ReDo's
+        # per-stage walk requires the explicit decomposition because each
+        # stage emits its own (prefixed) activation dict.
+        self._pre_core_layers = int(self.rep_params.get("pre_core_layers", 0))
+        self._core_layers = int(self.rep_params.get("core_layers", 0))
+        self._post_core_layers = int(self.rep_params.get("post_core_layers", 0))
+        if self.rep_params.get("layers") is not None:
             raise NotImplementedError(
-                f"DQN_ReDo on ForagerNet only supports layers=2; "
-                f"got layers={self.rep_params.get('layers')}."
+                "DQN_ReDo no longer supports the legacy `layers` knob; "
+                "use pre_core_layers/core_layers/post_core_layers instead."
+            )
+        if (
+            self._pre_core_layers + self._core_layers + self._post_core_layers
+        ) < 1:
+            raise NotImplementedError(
+                "DQN_ReDo on ForagerNet expects at least one of "
+                "pre_core_layers, core_layers, post_core_layers >= 1; "
+                f"got pre={self._pre_core_layers}, core={self._core_layers}, "
+                f"post={self._post_core_layers}."
             )
         if params.get("swr") is not None:
             raise NotImplementedError("DQN_ReDo does not support combining with SWR.")
 
         self._reset_ln = bool(params.get("redo_reset_layernorm", True))
         self._use_ln = bool(self.rep_params.get("use_layernorm", False))
+        self._preact_ln = bool(self.rep_params.get("preactivation_layer_norm", True))
+
+        # Build the per-stage walk plan as a list of (activation_key, linear_path,
+        # ln_path, next_linear_path). The Linear modules in ForagerNet's three
+        # ``accumulatingSequence`` stages live in a single Haiku scope (``phi/~/``)
+        # because ``accumulatingSequence`` is a plain closure (not an hk.Module);
+        # so Haiku auto-suffixes the modules globally as ``linear``, ``linear_1``,
+        # ``linear_2``, etc., in construction order.
+        self._stage_plan: List[Dict[str, object]] = []
+        linear_idx = 0
+        ln_idx = 0
+
+        def linear_name(i: int) -> str:
+            return "linear" if i == 0 else f"linear_{i}"
+
+        def ln_name(i: int) -> str:
+            return "layer_norm" if i == 0 else f"layer_norm_{i}"
+
+        stages = [
+            ("pre_core", self._pre_core_layers),
+            ("core", self._core_layers),
+            ("post_core", self._post_core_layers),
+        ]
+
+        # Within each ``accumulatingSequence`` stage Haiku module names are
+        # auto-suffixed *globally* across the three stages (because the
+        # sequences live in the same scope ``phi/~/``); but the activation
+        # keys are reset per-stage, so the post-ReLU activation in each stage
+        # is keyed simply ``<stage>/relu``. We currently support exactly 1
+        # layer per stage; multi-layer-per-stage walks are not implemented
+        # (each stage's internal sub-layers don't align with the natural
+        # pre/core/post seams that the user's configs use).
+        for stage_name, n_layers in stages:
+            if n_layers == 0:
+                continue
+            if n_layers != 1:
+                raise NotImplementedError(
+                    "DQN_ReDo currently supports exactly 1 layer per stage "
+                    f"(got {stage_name}_layers={n_layers}). "
+                    "Multi-layer per stage walks are not implemented."
+                )
+            self._stage_plan.append(
+                {
+                    "stage": stage_name,
+                    "act_key": f"{stage_name}/relu",
+                    "linear_name": linear_name(linear_idx),
+                    "ln_name": ln_name(ln_idx) if self._use_ln else None,
+                }
+            )
+            linear_idx += 1
+            if self._use_ln:
+                ln_idx += 1
+
+        # Outgoing target for stage i is stage i+1's Linear. For the last
+        # stage, the outgoing target is the Q head ``q/q/w``.
+        for i, plan in enumerate(self._stage_plan):
+            if i + 1 < len(self._stage_plan):
+                plan["next_linear_name"] = self._stage_plan[i + 1]["linear_name"]
+                plan["next_is_q"] = False
+            else:
+                plan["next_linear_name"] = None
+                plan["next_is_q"] = True
 
         hypers = Hypers(
             **self.state.hypers.__dict__,
@@ -97,8 +175,6 @@ class DQN_ReDo(DQN):
 
         feat = self.phi(state.params, x, scalars=scalars)
         threshold = state.hypers.redo_threshold
-        dormant_d1 = self._dormant(feat.activations["relu"], threshold)
-        dormant_d2 = self._dormant(feat.activations["relu_1"], threshold)
 
         # Mask trees mirror state.params; init to all-False.
         incoming_mask = jax.tree.map(
@@ -110,30 +186,59 @@ class DQN_ReDo(DQN):
 
         phi = state.params["phi"]
 
-        # ---- Dense_1 (first hidden Linear) ----
-        incoming_mask["phi"]["phi/~/linear"]["w"] = jnp.broadcast_to(
-            dormant_d1[None, :], phi["phi/~/linear"]["w"].shape
-        )
-        incoming_mask["phi"]["phi/~/linear"]["b"] = dormant_d1
-        if self._use_ln and self._reset_ln:
-            incoming_mask["phi"]["phi/~/layer_norm"]["scale"] = dormant_d1
-            incoming_mask["phi"]["phi/~/layer_norm"]["offset"] = dormant_d1
-        outgoing_mask["phi"]["phi/~/linear_1"]["w"] = jnp.broadcast_to(
-            dormant_d1[:, None], phi["phi/~/linear_1"]["w"].shape
-        )
+        for plan in self._stage_plan:
+            act_key = plan["act_key"]  # type: ignore[index]
+            linear_name = plan["linear_name"]  # type: ignore[index]
+            ln_name = plan["ln_name"]  # type: ignore[index]
+            linear_path = f"phi/~/{linear_name}"
 
-        # ---- Dense_2 (last hidden Linear) ----
-        incoming_mask["phi"]["phi/~/linear_1"]["w"] = jnp.broadcast_to(
-            dormant_d2[None, :], phi["phi/~/linear_1"]["w"].shape
-        )
-        incoming_mask["phi"]["phi/~/linear_1"]["b"] = dormant_d2
-        if self._use_ln and self._reset_ln:
-            incoming_mask["phi"]["phi/~/layer_norm_1"]["scale"] = dormant_d2
-            incoming_mask["phi"]["phi/~/layer_norm_1"]["offset"] = dormant_d2
-        # Outgoing: rows of q/w
-        outgoing_mask["q"]["q"]["w"] = jnp.broadcast_to(
-            dormant_d2[:, None], state.params["q"]["q"]["w"].shape
-        )
+            dormant = self._dormant(feat.activations[act_key], threshold)
+
+            # Incoming weights / bias of this stage's Linear.
+            incoming_mask["phi"][linear_path]["w"] = jnp.broadcast_to(
+                dormant[None, :], phi[linear_path]["w"].shape
+            )
+            incoming_mask["phi"][linear_path]["b"] = dormant
+
+            # Optional LayerNorm reset for the same dormant indices.
+            if self._use_ln and self._reset_ln and ln_name is not None:
+                ln_path = f"phi/~/{ln_name}"
+                incoming_mask["phi"][ln_path]["scale"] = dormant
+                incoming_mask["phi"][ln_path]["offset"] = dormant
+
+            # Outgoing weights of the next module (next Linear, or Q head).
+            #
+            # Note: between the pre_core and core stages the ForagerNet
+            # concatenates ``scalars`` onto the pre_core output, so the next
+            # Linear's input dimension may be larger than this stage's output.
+            # The dormant mask only applies to the first ``len(dormant)`` rows
+            # (the pre_core contribution); rows from the scalars contribution
+            # must remain untouched. We pad the mask with False rows.
+            if plan["next_is_q"]:  # type: ignore[index]
+                target_w = state.params["q"]["q"]["w"]
+                col_mask = jnp.broadcast_to(
+                    dormant[:, None], (dormant.shape[0], target_w.shape[1])
+                )
+                if col_mask.shape[0] != target_w.shape[0]:
+                    pad = jnp.zeros(
+                        (target_w.shape[0] - col_mask.shape[0], target_w.shape[1]),
+                        dtype=bool,
+                    )
+                    col_mask = jnp.concatenate([col_mask, pad], axis=0)
+                outgoing_mask["q"]["q"]["w"] = col_mask
+            else:
+                next_linear_path = f"phi/~/{plan['next_linear_name']}"  # type: ignore[index]
+                target_w = phi[next_linear_path]["w"]
+                col_mask = jnp.broadcast_to(
+                    dormant[:, None], (dormant.shape[0], target_w.shape[1])
+                )
+                if col_mask.shape[0] != target_w.shape[0]:
+                    pad = jnp.zeros(
+                        (target_w.shape[0] - col_mask.shape[0], target_w.shape[1]),
+                        dtype=bool,
+                    )
+                    col_mask = jnp.concatenate([col_mask, pad], axis=0)
+                outgoing_mask["phi"][next_linear_path]["w"] = col_mask
 
         leaves, treedef = jax.tree.flatten(state.params)
         keys = jax.random.split(init_key, len(leaves))
@@ -179,9 +284,9 @@ class DQN_ReDo(DQN):
         return replace(state, key=key, params=new_params, optim=new_optim)
 
     @partial(jax.jit, static_argnums=0)
-    def _maybe_update(self, state: AgentState) -> AgentState:
+    def _update_state_with_metrics(self, state: AgentState) -> AgentState:
         prev_updates = state.updates
-        state = super()._maybe_update(state)
+        state = super()._update_state_with_metrics(state)
         do_redo = (
             (state.updates != prev_updates)
             & (state.updates > 0)

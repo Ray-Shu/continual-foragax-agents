@@ -4,9 +4,7 @@
     "total_steps": 10000000,
     "episode_cutoff": -1,
     "metaParameters": {
-        "epsilon": 0.05,
-        "use_past_action": true,
-        "use_past_reward": true,
+        "epsilon": 0.1,
         "target_refresh": 128,
         "buffer_size": 1000,
         "buffer_min_size": 50,
@@ -14,7 +12,7 @@
         "environment": {
             "env_id": "ForagaxSquareWaveTwoBiome-v11",
             "aperture_size": 9,
-			"observation_type": "color"
+            "observation_type": "color"
         },
         "experiment": {
             "seed_offset": 0
@@ -22,21 +20,18 @@
         "gamma": 0.99,
         "optimizer": {
             "name": "Adam",
-            "alpha": [
-                0.003,
-                0.001,
-                0.0003,
-                0.0001,
-                3e-05
-            ],
+            "alpha": 0.001,
             "beta1": 0.9,
             "beta2": 0.999,
-            "eps": 1e-5
+            "eps": 1e-05
         },
         "representation": {
             "type": "ForagerNet",
             "hidden": 64,
-            "layers": 2,
+            "d_hidden": 512,
+            "pre_core_layers": 1,
+            "core_layers": 1,
+            "post_core_layers": 1,
             "conv": "None",
             "use_layernorm": true,
             "preactivation_layer_norm": true

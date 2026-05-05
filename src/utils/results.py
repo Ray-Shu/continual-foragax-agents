@@ -92,7 +92,7 @@ def read_metrics_from_data(
             if isinstance(datas[run_id][col].dtype, pl.Array):
                 datas[run_id] = datas[run_id].with_columns(
                     pl.col(col).arr.get(i).alias(f"{col}_{i}")
-                    for i in range(datas[run_id][col].dtype.shape[0])
+                    for i in range(datas[run_id][col].dtype.width)
                 )
 
         if "rewards" in datas[run_id].columns and (
@@ -216,7 +216,7 @@ def load_all_results_from_data(
     if "_metadata_" not in tables:
         return df.collect()
 
-    meta = cx.read_sql(
+    meta: pl.DataFrame = cx.read_sql(
         f"sqlite://{db_path}",
         "SELECT * FROM _metadata_",
         return_type="polars",
