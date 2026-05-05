@@ -3,7 +3,6 @@ from functools import partial
 from typing import Dict, List, Tuple
 
 import jax
-import jax.lax
 import jax.numpy as jnp
 from ml_instrumentation.Collector import Collector
 import optax
@@ -50,10 +49,6 @@ class DQN_ReDo(DQN):
                 f"got conv={self.rep_params.get('conv')!r}."
             )
 
-        # New schema (pre_core/core/post_core) is required. The legacy
-        # ``layers`` knob is still supported by ForagerNet but DQN_ReDo's
-        # per-stage walk requires the explicit decomposition because each
-        # stage emits its own (prefixed) activation dict.
         self._pre_core_layers = int(self.rep_params.get("pre_core_layers", 0))
         self._core_layers = int(self.rep_params.get("core_layers", 0))
         self._post_core_layers = int(self.rep_params.get("post_core_layers", 0))
@@ -78,12 +73,6 @@ class DQN_ReDo(DQN):
         self._use_ln = bool(self.rep_params.get("use_layernorm", False))
         self._preact_ln = bool(self.rep_params.get("preactivation_layer_norm", True))
 
-        # Build the per-stage walk plan as a list of (activation_key, linear_path,
-        # ln_path, next_linear_path). The Linear modules in ForagerNet's three
-        # ``accumulatingSequence`` stages live in a single Haiku scope (``phi/~/``)
-        # because ``accumulatingSequence`` is a plain closure (not an hk.Module);
-        # so Haiku auto-suffixes the modules globally as ``linear``, ``linear_1``,
-        # ``linear_2``, etc., in construction order.
         self._stage_plan: List[Dict[str, object]] = []
         linear_idx = 0
         ln_idx = 0
@@ -100,14 +89,6 @@ class DQN_ReDo(DQN):
             ("post_core", self._post_core_layers),
         ]
 
-        # Within each ``accumulatingSequence`` stage Haiku module names are
-        # auto-suffixed *globally* across the three stages (because the
-        # sequences live in the same scope ``phi/~/``); but the activation
-        # keys are reset per-stage, so the post-ReLU activation in each stage
-        # is keyed simply ``<stage>/relu``. We currently support exactly 1
-        # layer per stage; multi-layer-per-stage walks are not implemented
-        # (each stage's internal sub-layers don't align with the natural
-        # pre/core/post seams that the user's configs use).
         for stage_name, n_layers in stages:
             if n_layers == 0:
                 continue
@@ -129,8 +110,6 @@ class DQN_ReDo(DQN):
             if self._use_ln:
                 ln_idx += 1
 
-        # Outgoing target for stage i is stage i+1's Linear. For the last
-        # stage, the outgoing target is the Q head ``q/q/w``.
         for i, plan in enumerate(self._stage_plan):
             if i + 1 < len(self._stage_plan):
                 plan["next_linear_name"] = self._stage_plan[i + 1]["linear_name"]
@@ -207,7 +186,7 @@ class DQN_ReDo(DQN):
                 incoming_mask["phi"][ln_path]["offset"] = dormant
 
             # Outgoing weights of the next module (next Linear, or Q head).
-            #
+
             # Note: between the pre_core and core stages the ForagerNet
             # concatenates ``scalars`` onto the pre_core output, so the next
             # Linear's input dimension may be larger than this stage's output.
@@ -283,7 +262,6 @@ class DQN_ReDo(DQN):
 
         return replace(state, key=key, params=new_params, optim=new_optim)
 
-    @partial(jax.jit, static_argnums=0)
     def _update_state_with_metrics(self, state: AgentState) -> AgentState:
         prev_updates = state.updates
         state = super()._update_state_with_metrics(state)
