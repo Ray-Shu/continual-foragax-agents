@@ -422,13 +422,13 @@ def main():
             if num_metrics == 1:
                 axes = [axes]  # Make it a list for consistent handling
 
-    
+
     # Create color palette matching the order in filter_alg_apertures
     vibrant_colors = list(tc.colorsets["vibrant"])
     muted_colors = list(tc.colorsets["muted"])
-    
+
     combined_colors = vibrant_colors + [c for c in muted_colors if c not in vibrant_colors]
-    
+
     # If we need more than 7 colors, use alternative palette from seaborn
     total_algs_to_color = len(args.color_algs) if args.color_algs else (len(args.filter_alg_apertures) if args.filter_alg_apertures else len(hue_order))
     if total_algs_to_color <= len(vibrant_colors):
@@ -555,7 +555,7 @@ def main():
                                 palette[matches[0]] = color_str.split("-")[0] if "-" in color_str else color_str
                     else:
                         palette[alg] = color_str.split("-")[0] if "-" in color_str else color_str
-                
+
     if not palette:
         palette = None
 
@@ -567,7 +567,7 @@ def main():
             logger.warning(
                 f"--grid mode only uses the first metric. Ignoring: {args.metrics[1:]}"
             )
-        
+
         # Determine if we're using alg_ap based on cell specifications
         # If any cell contains ':', we're using alg_ap format (e.g., "DQN:5")
         use_alg_ap = any(":" in alg for cell in grid_cells for alg in cell)
@@ -615,14 +615,14 @@ def main():
                 logger.warning(f"Algorithms not found in cell {i}: {missing_algs}")
 
             cell_df = pl.concat(cell_df_list)
-            
+
             # Apply curve_algs filter if provided
             if args.curve_algs:
                 cell_df = cell_df.filter(pl.col(grid_hue_col).is_in(args.curve_algs))
                 cell_algs = [a for a in args.curve_algs if a in cell_algs]
                 if cell_df.is_empty():
                     continue
-                    
+
                 cell_order = {val: idx for idx, val in enumerate(cell_algs)}
                 cell_df = cell_df.with_columns(pl.col(grid_hue_col).replace(cell_order).alias("curve_order_col")).sort("curve_order_col")
 
@@ -733,7 +733,7 @@ def main():
         for i, seed in enumerate(unique_seeds):
             ax = axes[i]
             seed_df = df.filter(pl.col("seed") == seed)
-            
+
             curve_df = seed_df
             curve_hue_order = hue_order
             if args.curve_algs:
@@ -900,12 +900,12 @@ def main():
             if args.plot_avg or args.plot_bar_only:
                 # Calculate the average over frames for each seed
                 avg_df = df.group_by([hue_col, "seed"]).agg(pl.col(metric).mean().alias("avg"))
-                
+
                 # Check for frozen versions and map them to their base color
                 is_frozen = [("frozen" in h.lower()) for h in hue_order]
                 base_names = [re.sub(r"[-_ ]?frozen(?:[-_ ][a-zA-Z0-9]+)?", "", h, flags=re.IGNORECASE) for h in hue_order]
                 base_names = [re.sub(r" \(Frozen\)", "", b, flags=re.IGNORECASE) for b in base_names]
-                
+
                 bar_palette = None
                 if palette is not None:
                     bar_palette = {}
@@ -914,7 +914,7 @@ def main():
                             bar_palette[h] = palette[base]
                         else:
                             bar_palette[h] = palette.get(h, vibrant_colors[idx_h % len(vibrant_colors)])
-                
+
                 if args.horizontal_bars:
                     barplot = sns.barplot(
                         data=avg_df.to_pandas(),
@@ -945,7 +945,7 @@ def main():
                         legend=False,
                         dodge=False
                     )
-                
+
                 # Extract valid patches (excluding zero-thickness artifacts if any)
                 # We sort them by their primary coordinate to match hue_order
                 valid_patches = [p for p in barplot.patches if getattr(p, 'get_height', lambda: 0)() != 0 or getattr(p, 'get_width', lambda: 0)() != 0]
@@ -953,7 +953,7 @@ def main():
                     valid_patches.sort(key=lambda p: getattr(p, 'get_y', lambda: 0)())
                 else:
                     valid_patches.sort(key=lambda p: getattr(p, 'get_x', lambda: 0)())
-                    
+
                 # In case some patches were still filtered incorrectly, fallback to directly zipping if sizes match
                 if len(valid_patches) != len(is_frozen):
                     valid_patches = barplot.patches[:len(is_frozen)]
@@ -962,11 +962,11 @@ def main():
                     if frozen:
                         patch.set_hatch('//')
                         patch.set_edgecolor('white')
-                
+
                 if args.plot_bar_values:
                     # Calculate true means and bootstrapped CIs
                     import numpy as np
-                    
+
                     labels = []
                     lines_per_bar = 3 if len(ax_auc.lines) == len(valid_patches) * 3 else 1
                     for i, patch in enumerate(valid_patches):
@@ -978,9 +978,9 @@ def main():
                             val = patch.get_height()
                             err_data = ax_auc.lines[i * lines_per_bar].get_ydata()
                             err = (np.max(err_data) - np.min(err_data)) / 2
-                        
+
                         labels.append(f"{val:.3f} $\\pm$ {err:.3f}")
-                    
+
                     if len(ax_auc.containers) == 1:
                         ax_auc.bar_label(ax_auc.containers[0], labels=labels, padding=3)
                     else:
@@ -1013,7 +1013,7 @@ def main():
                     else:
                         ax_auc.set_xticklabels([])
                         ax_auc.set_xticks([])
-                        
+
                 if args.ylim:
                     if args.horizontal_bars:
                         if len(args.ylim) == 1:
@@ -1025,7 +1025,7 @@ def main():
                             ax_auc.set_ylim(top=args.ylim[0])
                         else:
                             ax_auc.set_ylim(args.ylim)
-                            
+
                 despine(ax_auc)
 
         # Handle legend
@@ -1053,7 +1053,7 @@ def main():
             # If lineplot was not drawn, grab the handles from the barplot
             if not handles and args.plot_bar_only and ax_auc:
                 handles, labels = ax_auc.get_legend_handles_labels()
-            
+
             mapped_labels = [get_mapped_label(label, LABEL_MAP, disable_fov=args.disable_fov) for label in labels]
             if handles:
                 legend_obj = ax_for_legend.legend(handles, mapped_labels, title=None, frameon=True, loc='best')

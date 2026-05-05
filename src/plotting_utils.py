@@ -321,7 +321,7 @@ def parse_plotting_args(parser: PlottingArgumentParser) -> argparse.Namespace:
     """Parses and returns common plotting arguments."""
     args = parser.parse_args()
     args.experiment_path = Path(args.path).resolve()
-    
+
     # Update matplotlib font sizes with chosen font size
     if hasattr(args, "font_size"):
         plt.rcParams.update({
@@ -331,7 +331,7 @@ def parse_plotting_args(parser: PlottingArgumentParser) -> argparse.Namespace:
             "font.size": args.font_size,
             "legend.fontsize": args.font_size,
         })
-        
+
     return args
 
 

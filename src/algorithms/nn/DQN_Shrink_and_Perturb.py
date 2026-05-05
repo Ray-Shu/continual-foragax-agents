@@ -1,5 +1,6 @@
 from dataclasses import replace
 from functools import partial
+import zlib
 from typing import Dict
 
 import jax
@@ -11,6 +12,11 @@ import utils.chex as cxu
 from algorithms.nn.DQN import DQN
 from algorithms.nn.DQN import AgentState as BaseAgentState
 from algorithms.nn.DQN import Hypers as BaseHypers
+
+
+def _keypath_crc32(path) -> int:
+    path_str = "/".join(str(getattr(entry, "key", entry)) for entry in path)
+    return zlib.crc32(path_str.encode("utf-8"))
 
 
 @cxu.dataclass
@@ -63,11 +69,12 @@ class DQN_Shrink_and_Perturb(DQN):
     def _shrink_and_perturb(self, state: AgentState):
         key, subkey = jax.random.split(state.key)
 
-        def sp(p):
-            noise = jax.random.normal(subkey, shape=p.shape, dtype=p.dtype)
+        def sp(path, p):
+            leaf_key = jax.random.fold_in(subkey, _keypath_crc32(path))
+            noise = jax.random.normal(leaf_key, shape=p.shape, dtype=p.dtype)
             return p * state.hypers.shrink_factor + noise * state.hypers.noise_scale
 
-        params = jax.tree_util.tree_map(sp, state.params)
+        params = jax.tree_util.tree_map_with_path(sp, state.params)
 
         optimizer = self._build_optimizer(state.hypers.optimizer, state.hypers.swr)
         optim = optimizer.init(params)

@@ -9,7 +9,7 @@ from plotting_utils import FONTSIZE, get_mapped_label
 
 def annotate_plot(
     ax: Axes,
-    label_map: Dict[str, str],
+    label_map: Optional[Dict[str, str]] = None,
     color_map: Optional[Dict[str, Any]] = None,
     flip: bool = False,
     disable_fov: bool = False,

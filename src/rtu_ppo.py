@@ -9,6 +9,7 @@ import time
 import logging
 import os
 import sys
+import zlib
 from collections.abc import Mapping
 from functools import partial
 from typing import Any, Callable, NamedTuple, Tuple
@@ -48,6 +49,11 @@ sys.path.insert(0, os.path.abspath("/tmp/src"))
 from foragax.registry import make
 
 PERIOD = 182500
+
+
+def _keypath_crc32(path) -> int:
+    path_str = "/".join(str(getattr(entry, "key", entry)) for entry in path)
+    return zlib.crc32(path_str.encode("utf-8"))
 
 
 def parse_indices(index_specs: list[str], total: int | None = None) -> list[int]:
@@ -902,11 +908,12 @@ def experiment(rng, config: TrainConfig):
             """Apply shrink-and-perturb to all network parameters."""
             rng, noise_rng = jax.random.split(rng)
 
-            def sp(p):
-                noise = jax.random.normal(noise_rng, shape=p.shape, dtype=p.dtype)
+            def sp(path, p):
+                leaf_rng = jax.random.fold_in(noise_rng, _keypath_crc32(path))
+                noise = jax.random.normal(leaf_rng, shape=p.shape, dtype=p.dtype)
                 return p * config.shrink_factor + noise * config.noise_scale
 
-            new_params = jax.tree_util.tree_map(sp, train_state.params)
+            new_params = jax.tree_util.tree_map_with_path(sp, train_state.params)
 
             # Reinitialize optimizer state for the perturbed parameters
             new_opt_state = tx.init(new_params)
