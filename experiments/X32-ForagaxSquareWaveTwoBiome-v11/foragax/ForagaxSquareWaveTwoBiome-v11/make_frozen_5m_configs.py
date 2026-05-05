@@ -31,7 +31,6 @@ def main():
 
         data["agent"] = data["agent"] + SUFFIX
         data["metaParameters"]["freeze_steps"] = 5000000
-        # data["metaParameters"]["freeze_steps_end"] = 6000000
 
         with dst.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
