@@ -8,9 +8,7 @@ import socket
 import time
 import logging
 import os
-import socket
 import sys
-import time
 from collections.abc import Mapping
 from functools import partial
 from typing import Any, Callable, NamedTuple, Tuple
@@ -31,7 +29,6 @@ from ml_instrumentation.Sampler import Ignore, MovingAverage, Subsample
 from ml_instrumentation.utils import Pipe
 from PyExpUtils.results.tools import getParamsAsDict
 
-import utils.jax_compat
 from algorithms.nn.ACConv import ActorCriticConv
 from algorithms.nn.ACMLP import ActorCriticMLP
 from algorithms.nn.RealTimeACConv import RealTimeActorCriticConv

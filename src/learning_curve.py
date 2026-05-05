@@ -24,6 +24,64 @@ from plotting_utils import (
 )
 
 
+def _max_bar_label_width(hue_order, args):
+    max_label_len = max(
+        (
+            len(get_mapped_label(h, LABEL_MAP, disable_fov=args.disable_fov))
+            for h in hue_order
+        ),
+        default=0,
+    )
+    return max_label_len * 0.15
+
+
+def _default_bar_ratio(hue_order, args):
+    return max(1.0, len(hue_order) / 3.0) if args.legend_on_bar else 1.0
+
+
+def compute_figsize(num_metrics, hue_order, args):
+    base_width = 8.0
+    base_height = 6.0
+    font_size = getattr(args, "font_size", None) or 24
+    extra_width = (
+        max(0.0, (font_size - 24) * 0.2)
+        if args.horizontal_bars and args.legend_on_bar
+        else 0.0
+    )
+    bar_ratio = None
+
+    if args.plot_avg and not args.plot_bar_only:
+        if args.horizontal_bars and args.legend_on_bar:
+            bar_inner_width = 3.0
+            total_bar_width = bar_inner_width + _max_bar_label_width(hue_order, args)
+            bar_ratio = (total_bar_width / base_width) * 3.0
+            fig_width = base_width + total_bar_width + extra_width
+        else:
+            bar_ratio = _default_bar_ratio(hue_order, args)
+            fig_width = base_width + 2 * bar_ratio + extra_width
+    elif args.plot_bar_only:
+        if args.horizontal_bars and args.legend_on_bar:
+            bar_inner_width = 3.0
+            fig_width = (
+                bar_inner_width
+                + _max_bar_label_width(hue_order, args)
+                + extra_width
+                + 1.0
+            )
+        else:
+            bar_ratio = _default_bar_ratio(hue_order, args)
+            total_fig_width = base_width + 2 * bar_ratio
+            fig_width = (
+                total_fig_width * (bar_ratio / (3 + bar_ratio))
+                + 2.0
+                + extra_width
+            )
+    else:
+        fig_width = base_width
+
+    return (fig_width, base_height * num_metrics), bar_ratio
+
+
 def main():
     parser = PlottingArgumentParser(description="Plot learning curves.")
     parser.add_argument(
@@ -340,84 +398,29 @@ def main():
             axes = [axes]
         else:
             axes = axes.flatten() if nrows > 1 or ncols > 1 else [axes]
-    elif num_metrics == 1:
-        font_size = args.font_size if hasattr(args, "font_size") and args.font_size else 24
-        extra_width = max(0.0, (font_size - 24) * 0.2) if args.horizontal_bars and args.legend_on_bar else 0.0
-        
-        if args.plot_avg and not args.plot_bar_only:
-            # Increase bar width significantly when using horizontal bars + legend on bar
-            if args.horizontal_bars and args.legend_on_bar:
-                max_label_len = max([len(get_mapped_label(h, LABEL_MAP, disable_fov=args.disable_fov)) for h in hue_order]) if hue_order else 0
-                text_width = max_label_len * 0.15
-                bar_inner_width = 3.0
-                total_bar_width = bar_inner_width + text_width
-                bar_ratio = (total_bar_width / 8.0) * 3.0
-                fig_width = 8.0 + total_bar_width + extra_width
-            else:
-                bar_ratio = max(1.0, len(hue_order) / 3.0) if args.legend_on_bar else 1.0
-                fig_width = 8 + 2 * bar_ratio + extra_width
-                
-            fig_height = 6.0
-            fig, axes = plt.subplots(1, 2, layout="constrained", gridspec_kw={'width_ratios': [3, bar_ratio], 'wspace': 0.15 if args.horizontal_bars else 0.05}, figsize=(fig_width, fig_height))
-            axes = axes.reshape(1, 2)
-        else:
-            if args.plot_bar_only:
-                if args.horizontal_bars and args.legend_on_bar:
-                    max_label_len = max([len(get_mapped_label(h, LABEL_MAP, disable_fov=args.disable_fov)) for h in hue_order]) if hue_order else 0
-                    text_width = max_label_len * 0.15
-                    bar_inner_width = 3.0
-                    fig_width = bar_inner_width + text_width + extra_width + 1.0
-                else:
-                    bar_ratio = max(1.0, len(hue_order) / 3.0) if args.legend_on_bar else 1.0
-                    total_fig_width = 8 + 2 * bar_ratio
-                    fig_width = total_fig_width * (bar_ratio / (3 + bar_ratio)) + 2.0 + extra_width
-                fig_height = 6.0
-            else:
-                fig_width = 8
-                fig_height = 6.0
-                
-            fig, axes = plt.subplots(1, 1, layout="constrained", figsize=(fig_width, fig_height))
-            axes = [axes]  # Make it a list for consistent handling
     else:
-        font_size = args.font_size if hasattr(args, "font_size") and args.font_size else 24
-        extra_width = max(0.0, (font_size - 24) * 0.2) if args.horizontal_bars and args.legend_on_bar else 0.0
-        
+        figsize, bar_ratio = compute_figsize(num_metrics, hue_order, args)
+
         if args.plot_avg and not args.plot_bar_only:
-            # Increase bar width significantly when using horizontal bars + legend on bar
-            if args.horizontal_bars and args.legend_on_bar:
-                max_label_len = max([len(get_mapped_label(h, LABEL_MAP, disable_fov=args.disable_fov)) for h in hue_order]) if hue_order else 0
-                text_width = max_label_len * 0.15
-                bar_inner_width = 3.0
-                total_bar_width = bar_inner_width + text_width
-                bar_ratio = (total_bar_width / 8.0) * 3.0
-                fig_width = 8.0 + total_bar_width + extra_width
-            else:
-                bar_ratio = max(1.0, len(hue_order) / 3.0) if args.legend_on_bar else 1.0
-                fig_width = 8 + 2 * bar_ratio + extra_width
-                
-            base_height = 6.0
+            assert bar_ratio is not None
             fig, axes = plt.subplots(
-                num_metrics, 2, layout="constrained", figsize=(fig_width, base_height * num_metrics), gridspec_kw={'width_ratios': [3, bar_ratio], 'wspace': 0.15 if args.horizontal_bars else 0.05}
+                num_metrics,
+                2,
+                layout="constrained",
+                figsize=figsize,
+                gridspec_kw={
+                    'width_ratios': [3, bar_ratio],
+                    'wspace': 0.15 if args.horizontal_bars else 0.05,
+                },
             )
+            if num_metrics == 1:
+                axes = axes.reshape(1, 2)
         else:
-            if args.plot_bar_only:
-                if args.horizontal_bars and args.legend_on_bar:
-                    max_label_len = max([len(get_mapped_label(h, LABEL_MAP, disable_fov=args.disable_fov)) for h in hue_order]) if hue_order else 0
-                    text_width = max_label_len * 0.15
-                    bar_inner_width = 3.0
-                    fig_width = bar_inner_width + text_width + extra_width + 1.0
-                else:
-                    bar_ratio = max(1.0, len(hue_order) / 3.0) if args.legend_on_bar else 1.0
-                    total_fig_width = 8 + 2 * bar_ratio
-                    fig_width = total_fig_width * (bar_ratio / (3 + bar_ratio)) + 2.0 + extra_width
-                base_height = 6.0
-            else:
-                fig_width = 8
-                base_height = 6.0
-            
             fig, axes = plt.subplots(
-                num_metrics, 1, layout="constrained", figsize=(fig_width, base_height * num_metrics)
+                num_metrics, 1, layout="constrained", figsize=figsize
             )
+            if num_metrics == 1:
+                axes = [axes]  # Make it a list for consistent handling
 
     
     # Create color palette matching the order in filter_alg_apertures
@@ -456,9 +459,13 @@ def main():
     elif args.filter_algs:
         # Map colors: use COLOR_MAP if available, else fall back to cycling
         palette = {}
-        fallback_idx = [0]
+        fallback_idx = 0
         for alg in args.filter_algs:
-            palette[alg] = lookup_color(alg, fallback_idx)
+            if alg in COLOR_MAP:
+                palette[alg] = COLOR_MAP[alg]
+            else:
+                palette[alg] = vibrant_colors[fallback_idx % len(vibrant_colors)]
+                fallback_idx += 1
     else:
         # Use default palette ordering
         palette = {}

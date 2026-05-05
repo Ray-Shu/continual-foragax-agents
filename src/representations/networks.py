@@ -466,9 +466,11 @@ class RTU(hk.Module):
         """
         Args:
           x: Input tensor with shape [N, 1, ...]
-          reset: Optional binary flag sequence with shape [N, 1] indicating when to reset the GRU state.
+          reset: Optional binary flag sequence with shape [N, 1] indicating when to reset the RTU state.
                  For example, at episode boundaries.
           carry: The initial hidden state for RNN.
+          is_target: Target-network calls use the replayed/burned-in next-state carry directly
+                     and intentionally do not overwrite it with the initial state on reset.
 
         Returns:
           outputs_sequence: Representation vectors sequence.
@@ -495,7 +497,9 @@ class RTU(hk.Module):
             expanded_mask = mask.reshape(mask.shape + (1,) * dims_to_add)
             return expanded_mask
 
-        # Replace entries in carry where reset is true with the initial state
+        # Online RTU calls start a new episode from the RTU initial state. Target calls
+        # receive carryp, which is already the replayed or burn-in-derived next-state
+        # carry, so resetting here would clobber the target boundary state.
         if not is_target:
             init_state = self.initial_state(N)
             carry = jax.tree.map(

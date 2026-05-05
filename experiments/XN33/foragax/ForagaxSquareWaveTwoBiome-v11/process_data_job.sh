@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=aip-amw8
-#SBATCH --job-name=XN33-ForagaxSquareWaveTwoBiome-v11_foragax_ForagaxSquareWaveTwoBiome-v11_process_data
+#SBATCH --job-name=XN33_foragax_ForagaxSquareWaveTwoBiome-v11_process_data
 #SBATCH --mem-per-cpu=16G
 #SBATCH --ntasks=16
 #SBATCH --output={$SCRATCH}/slurm-%j.out
@@ -19,4 +19,4 @@ export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_thread
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
 export JAX_PLATFORMS=cpu
 
-$SLURM_TMPDIR/.venv/bin/python src/process_data.py experiments/XN33-ForagaxSquareWaveTwoBiome-v11/foragax/ForagaxSquareWaveTwoBiome-v11
+$SLURM_TMPDIR/.venv/bin/python src/process_data.py experiments/XN33/foragax/ForagaxSquareWaveTwoBiome-v11
