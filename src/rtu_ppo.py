@@ -81,6 +81,10 @@ def parse_indices(index_specs: list[str], total: int | None = None) -> list[int]
     return indices
 
 
+def _crossed_interval(start_step, end_step, interval):
+    return (end_step > 0) & ((end_step // interval) > (start_step // interval))
+
+
 @struct.dataclass
 class LogEnvState:
     returned_returns: float
@@ -954,6 +958,7 @@ def experiment(rng, config: TrainConfig):
             rng,
             hstate,
         ) = env_step_state
+        start_timestep = log_env_state.timestep
 
         updates_per_video = (
             config.video_length + config.rollout_steps - 1
@@ -1095,8 +1100,8 @@ def experiment(rng, config: TrainConfig):
         # Periodically reset last layer (actor_mean + critic_value) params and optimizer
         # states.  Guarded at trace time by config.use_reset so no overhead when disabled.
         if config.use_reset:
-            should_reset = (iteration_idx > 0) & (
-                iteration_idx % config.reset_interval == 0
+            should_reset = should_update & _crossed_interval(
+                start_timestep, log_env_state.timestep, config.reset_interval
             )
             train_state, rng = jax.lax.cond(
                 should_reset,
@@ -1109,8 +1114,8 @@ def experiment(rng, config: TrainConfig):
         # Periodically shrink all params and add noise, then reinit optimizer.
         # Guarded at trace time by config.use_shrink_and_perturb.
         if config.use_shrink_and_perturb:
-            should_sp = (iteration_idx > 0) & (
-                iteration_idx % config.sp_interval == 0
+            should_sp = should_update & _crossed_interval(
+                start_timestep, log_env_state.timestep, config.sp_interval
             )
             train_state, rng = jax.lax.cond(
                 should_sp,
@@ -1310,6 +1315,8 @@ def main():
         )
         if args.max_steps is not None:
             num_updates = args.max_steps
+        reset_interval = hypers.get("reset_interval", hypers.get("reset_steps", -1))
+        sp_interval = hypers.get("sp_interval", hypers.get("sp_steps", -1))
         config = TrainConfig(
             d_hidden=int(hypers["representation"]["d_hidden"]),
             agent_type=exp.agent,
@@ -1393,10 +1400,10 @@ def main():
             freeze_steps=int(freeze_steps),
             allocate_frames=allocate_frames,
             video_length=int(hypers.get("experiment", {}).get("video_length", 1000)),
-            use_reset=bool(hypers.get("reset_interval", -1) > 0),
-            reset_interval=int(hypers.get("reset_interval", -1)),
-            use_shrink_and_perturb=bool(hypers.get("sp_interval", -1) > 0),
-            sp_interval=int(hypers.get("sp_interval", -1)),
+            use_reset=bool(reset_interval > 0),
+            reset_interval=int(reset_interval),
+            use_shrink_and_perturb=bool(sp_interval > 0),
+            sp_interval=int(sp_interval),
             shrink_factor=float(hypers.get("shrink_factor", 1.0)),
             noise_scale=float(hypers.get("noise_scale", 0.0)),
         )
