@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 import numpy as np
 from matplotlib.axes import Axes
@@ -7,7 +7,13 @@ from matplotlib.axes import Axes
 from plotting_utils import FONTSIZE, get_mapped_label
 
 
-def annotate_plot(ax: Axes, label_map: Optional[Dict[str, str]] = None):
+def annotate_plot(
+    ax: Axes,
+    label_map: Optional[Dict[str, str]] = None,
+    color_map: Optional[Dict[str, Any]] = None,
+    flip: bool = False,
+    disable_fov: bool = False,
+):
     """Annotates lines on a plot and removes the legend."""
     logger = logging.getLogger(__name__)
 
@@ -24,7 +30,7 @@ def annotate_plot(ax: Axes, label_map: Optional[Dict[str, str]] = None):
         logger.info(f"Lines with data (startswith _): {len(lines_with_data)}")
         if len(lines_with_data) == len(labels):
             for line, label in zip(lines_with_data, labels, strict=True):
-                mapped_label = get_mapped_label(label, label_map)
+                mapped_label = get_mapped_label(label, label_map, disable_fov=disable_fov)
                 line.set_label(mapped_label)
         legend.remove()
 
@@ -369,7 +375,7 @@ def annotate_plot(ax: Axes, label_map: Optional[Dict[str, str]] = None):
 
                 # Store absolute position for manual label placement
                 label_color = lines_to_label[idx].get_color()
-                mapped_label = get_mapped_label(label_text, label_map)
+                mapped_label = get_mapped_label(label_text, label_map, disable_fov=disable_fov)
                 label_positions.append(
                     {
                         "x": x_label,

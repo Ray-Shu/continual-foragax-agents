@@ -3,11 +3,13 @@
 # Ensure third-party libraries that expect older JAX internals can import.
 # This sets a small compatibility alias if needed before importing distrax/tfp.
 import argparse
+import utils.jax_compat  # noqa: F401
+import socket
+import time
 import logging
 import os
-import socket
 import sys
-import time
+import zlib
 from collections.abc import Mapping
 from functools import partial
 from typing import Any, Callable, NamedTuple, Tuple
@@ -28,7 +30,6 @@ from ml_instrumentation.Sampler import Ignore, MovingAverage, Subsample
 from ml_instrumentation.utils import Pipe
 from PyExpUtils.results.tools import getParamsAsDict
 
-import utils.jax_compat
 from algorithms.nn.ACConv import ActorCriticConv
 from algorithms.nn.ACMLP import ActorCriticMLP
 from algorithms.nn.RealTimeACConv import RealTimeActorCriticConv
@@ -48,6 +49,40 @@ sys.path.insert(0, os.path.abspath("/tmp/src"))
 from foragax.registry import make
 
 PERIOD = 182500
+
+
+def _keypath_crc32(path) -> int:
+    path_str = "/".join(str(getattr(entry, "key", entry)) for entry in path)
+    return zlib.crc32(path_str.encode("utf-8"))
+
+
+def parse_indices(index_specs: list[str], total: int | None = None) -> list[int]:
+    indices = []
+    for spec in index_specs:
+        if ":" not in spec:
+            indices.append(int(spec))
+            continue
+
+        parts = spec.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid index slice '{spec}', expected START:STOP")
+
+        start_s, stop_s = parts
+        start = int(start_s) if start_s else 0
+        if stop_s:
+            stop = int(stop_s)
+        elif total is not None:
+            stop = total
+        else:
+            raise ValueError(f"Open-ended index slice '{spec}' requires total runs")
+
+        indices.extend(range(start, stop))
+
+    return indices
+
+
+def _crossed_interval(start_step, end_step, interval):
+    return (end_step > 0) & ((end_step // interval) > (start_step // interval))
 
 
 @struct.dataclass
@@ -81,6 +116,8 @@ class TrainConfig:
     video_length: int = struct.field(pytree_node=False)
     use_l2_init: bool = struct.field(pytree_node=False)
     use_spectral_reg: bool = struct.field(pytree_node=False)
+    use_reset: bool = struct.field(pytree_node=False)
+    use_shrink_and_perturb: bool = struct.field(pytree_node=False)
     # ---- DYNAMIC (may vary per idx; arithmetic only) ----
     max_grad_norm: float
     l2_reg_pi: float
@@ -109,6 +146,10 @@ class TrainConfig:
     lambda_spectral_pi: float = 0.0
     lambda_spectral_vf: float = 0.0
     freeze_steps: int = -1
+    reset_interval: int = -1
+    sp_interval: int = -1
+    shrink_factor: float = 1.0
+    noise_scale: float = 0.0
 
 class GymnaxEnvState(struct.PyTreeNode):
     to_render: bool = struct.field(pytree_node=True)
@@ -810,6 +851,83 @@ def experiment(rng, config: TrainConfig):
         zeros = jnp.zeros((config.epochs, config.num_mini_batch), dtype=jnp.float32)
         return (zeros, (zeros, zeros, zeros))
 
+    # Last-layer reset: reinitialize actor_mean and critic_value params + optimizer states.
+    # The network is re-initialized from scratch with a fresh key; only the last-layer
+    # leaves are swapped in (params and optimizer state).  Guarded by `config.use_reset`.
+    if config.use_reset:
+        # Pre-compute which leaves belong to the last layer, keyed by flattened path.
+        _flat_params = traverse_util.flatten_dict(network_params, sep="/")
+        _last_layer_keys = frozenset(
+            k for k in _flat_params
+            if "actor_mean" in k or "critic_value" in k
+        )
+
+        def _is_last_layer(path_str):
+            return path_str in _last_layer_keys
+
+        _last_layer_mask = traverse_util.unflatten_dict(
+            {tuple(k.split("/")): _is_last_layer(k) for k in _flat_params}
+        )
+
+        def _reset_last_layer(train_state, rng):
+            """Reinitialize last-layer params and their optimizer states."""
+            rng, init_rng = jax.random.split(rng)
+            # Get fresh random parameters for the entire network
+            fresh_params = network.init(init_rng, init_hstate, init_x)
+
+            # Selectively replace only last-layer params
+            new_params = jax.tree_util.tree_map(
+                lambda mask, fresh, old: jnp.where(mask, fresh, old),
+                _last_layer_mask,
+                fresh_params,
+                train_state.params,
+            )
+
+            # Reinitialize optimizer state: build fresh opt state from new params,
+            # then selectively swap only last-layer entries.
+            fresh_opt_state = tx.init(new_params)
+            new_opt_state = jax.tree_util.tree_map_with_path(
+                lambda path, fresh_val, old_val: (
+                    fresh_val if any(
+                        (hasattr(k, "key") and (
+                            "actor_mean" in k.key or "critic_value" in k.key
+                        ))
+                        for k in path
+                    ) else old_val
+                ),
+                fresh_opt_state,
+                train_state.opt_state,
+            )
+
+            train_state = train_state.replace(
+                params=new_params,
+                opt_state=new_opt_state,
+            )
+            return train_state, rng
+
+    # Shrink and Perturb: shrink all params towards zero and add Gaussian noise,
+    # then reinitialize optimizer state.  Guarded by `config.use_shrink_and_perturb`.
+    if config.use_shrink_and_perturb:
+        def _shrink_and_perturb(train_state, rng):
+            """Apply shrink-and-perturb to all network parameters."""
+            rng, noise_rng = jax.random.split(rng)
+
+            def sp(path, p):
+                leaf_rng = jax.random.fold_in(noise_rng, _keypath_crc32(path))
+                noise = jax.random.normal(leaf_rng, shape=p.shape, dtype=p.dtype)
+                return p * config.shrink_factor + noise * config.noise_scale
+
+            new_params = jax.tree_util.tree_map_with_path(sp, train_state.params)
+
+            # Reinitialize optimizer state for the perturbed parameters
+            new_opt_state = tx.init(new_params)
+
+            train_state = train_state.replace(
+                params=new_params,
+                opt_state=new_opt_state,
+            )
+            return train_state, rng
+
     env_step_state = (
         train_state,
         gymnax_state,
@@ -840,6 +958,7 @@ def experiment(rng, config: TrainConfig):
             rng,
             hstate,
         ) = env_step_state
+        start_timestep = log_env_state.timestep
 
         updates_per_video = (
             config.video_length + config.rollout_steps - 1
@@ -978,6 +1097,34 @@ def experiment(rng, config: TrainConfig):
             should_update, update_step, skip_update, update_state
         )
 
+        # Periodically reset last layer (actor_mean + critic_value) params and optimizer
+        # states.  Guarded at trace time by config.use_reset so no overhead when disabled.
+        if config.use_reset:
+            should_reset = should_update & _crossed_interval(
+                start_timestep, log_env_state.timestep, config.reset_interval
+            )
+            train_state, rng = jax.lax.cond(
+                should_reset,
+                _reset_last_layer,
+                lambda ts, r: (ts, r),
+                train_state,
+                rng,
+            )
+
+        # Periodically shrink all params and add noise, then reinit optimizer.
+        # Guarded at trace time by config.use_shrink_and_perturb.
+        if config.use_shrink_and_perturb:
+            should_sp = should_update & _crossed_interval(
+                start_timestep, log_env_state.timestep, config.sp_interval
+            )
+            train_state, rng = jax.lax.cond(
+                should_sp,
+                _shrink_and_perturb,
+                lambda ts, r: (ts, r),
+                train_state,
+                rng,
+            )
+
         # Collect a scalar reward summary for this iteration (mean reward over rollout)
         rewards = traj_batch.reward
         pos = traj_batch.info["pos"]
@@ -1069,7 +1216,7 @@ def experiment(rng, config: TrainConfig):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--exp", type=str, required=True)
-    parser.add_argument("-i", "--idxs", nargs="+", type=int, required=True)
+    parser.add_argument("-i", "--idxs", nargs="+", type=str, required=True)
     parser.add_argument("--save_path", type=str, default="./")
     parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/")
     parser.add_argument("--silent", action="store_true", default=False)
@@ -1099,8 +1246,11 @@ def main():
 
     exp = ExperimentModel.load(args.exp)
 
-    indices = args.idxs
-    allocate_frames = False
+    try:
+        indices = parse_indices(args.idxs, exp.numPermutations())
+    except ValueError as e:
+        parser.error(str(e))
+    allocate_frames = len(indices) == 1
 
     # --------------------
     # -- Batch Set-up --
@@ -1148,13 +1298,6 @@ def main():
         rng = jax.random.PRNGKey(seed)
 
         freeze_steps = hypers.get("freeze_after_steps", hypers.get("freeze_steps", -1))
-        if "freeze_steps_end" in hypers:
-            # TODO: this is to match the key for the env reset, that is the jax.random.PRNGKey(seed)[1] is used to reset the env
-            freeze_key = jax.random.PRNGKey(seed + 42)
-            freeze_steps_end = hypers["freeze_steps_end"]
-            freeze_steps = jax.random.randint(freeze_key, (), freeze_steps, freeze_steps_end + 1)
-            print(f"Freeze steps sampled to {freeze_steps}")
-
         rngs.append(rng)
 
         # derive num_updates if not explicitly present
@@ -1165,6 +1308,8 @@ def main():
         )
         if args.max_steps is not None:
             num_updates = args.max_steps
+        reset_interval = hypers.get("reset_interval", hypers.get("reset_steps", -1))
+        sp_interval = hypers.get("sp_interval", hypers.get("sp_steps", -1))
         config = TrainConfig(
             d_hidden=int(hypers["representation"]["d_hidden"]),
             agent_type=exp.agent,
@@ -1217,7 +1362,7 @@ def main():
             sparsity=hypers["representation"].get("sparsity", None),
             spectral_radius=hypers["representation"].get("spectral_radius", None),
             use_sinusoidal_encoding=bool(hypers.get("use_sinusoidal_encoding", False)),
-            use_reward_trace=bool(hypers.get("use_reward_trace", False)),
+            use_reward_trace=bool(hypers.get("use_reward_trace", hypers.get("representation", {}).get("use_reward_trace", False))),
             use_hint_trace=bool("_HT" in exp.agent),
             use_layernorm=bool(
                 hypers.get(
@@ -1248,6 +1393,12 @@ def main():
             freeze_steps=int(freeze_steps),
             allocate_frames=allocate_frames,
             video_length=int(hypers.get("experiment", {}).get("video_length", 1000)),
+            use_reset=bool(reset_interval > 0),
+            reset_interval=int(reset_interval),
+            use_shrink_and_perturb=bool(sp_interval > 0),
+            sp_interval=int(sp_interval),
+            shrink_factor=float(hypers.get("shrink_factor", 1.0)),
+            noise_scale=float(hypers.get("noise_scale", 0.0)),
         )
         configs.append(config)
 

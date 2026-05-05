@@ -6,8 +6,7 @@
         "environment": {
             "env_id": "ForagaxSquareWaveTwoBiome-v11",
             "aperture_size": 9,
-            "random_shift_max_steps": 10000000,
-			"observation_type": "rgb"
+            "observation_type": "color"
         },
         "experiment": {
             "seed_offset": 0
@@ -40,9 +39,9 @@
         },
         "representation": {
             "hidden": 64,
-            "d_hidden": 256
+            "d_hidden": 256,
+            "use_layernorm": true
         },
-        "freeze_steps": 5000000,
-        "freeze_steps_end": 6000000
+        "freeze_steps": 5000000
     }
 }

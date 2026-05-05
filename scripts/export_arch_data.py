@@ -237,8 +237,8 @@ def build_drqn_graph(variant_data):
     use_ln = variant_data["use_layernorm"]
     conv_out = variant_data["conv_out"]
     concat_sz = variant_data["concat_size"]
-    pre = variant_data.get("pre_gru_layers", 0)
-    post = variant_data.get("post_gru_layers", 0)
+    pre = variant_data.get("pre_core_layers", variant_data.get("pre_gru_layers", 0))
+    post = variant_data.get("post_core_layers", variant_data.get("post_gru_layers", 0))
     fov = variant_data["fov"]
     has_hint = variant_data.get("has_hint", False)
 
@@ -909,8 +909,12 @@ def get_dqn_data(config_name):
     }
     is_drqn = config_name.startswith("DRQN")
     if is_drqn:
-        d["pre_gru_layers"] = rep.get("pre_gru_layers", 0)
-        d["post_gru_layers"] = rep.get("post_gru_layers", 0)
+        d["pre_core_layers"] = rep.get(
+            "pre_core_layers", rep.get("pre_gru_layers", 0)
+        )
+        d["post_core_layers"] = rep.get(
+            "post_core_layers", rep.get("post_gru_layers", 0)
+        )
 
     d["graph"] = build_drqn_graph(d) if is_drqn else build_dqn_graph(d)
     return d
