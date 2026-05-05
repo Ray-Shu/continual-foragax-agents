@@ -7,6 +7,8 @@ noise tensors for any two same-shape leaves rather than the i.i.d. Gaussian
 draws shrink-and-perturb requires (issue #161).
 """
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 
@@ -24,6 +26,11 @@ def _shrink_and_perturb_kernel(key, params, shrink_factor, noise_scale):
     return jax.tree_util.tree_map(sp, keys_tree, params)
 
 
+_jitted_kernel = jax.jit(
+    _shrink_and_perturb_kernel, static_argnames=("shrink_factor", "noise_scale")
+)
+
+
 class TestShrinkAndPerturbKeySplit:
     """Independent per-leaf noise — pattern used in ``_shrink_and_perturb``."""
 
@@ -33,23 +40,15 @@ class TestShrinkAndPerturbKeySplit:
             "a": jnp.zeros((4, 4)),
             "b": jnp.zeros((4, 4)),
         }
-        shrink_factor = 0.5
-        noise_scale = 1.0
-
-        key = jax.random.PRNGKey(0)
         new_params = _shrink_and_perturb_kernel(
-            key, params, shrink_factor, noise_scale
+            jax.random.PRNGKey(0), params, 0.5, 1.0
         )
 
-        # Because params start at zero, post-perturb values equal scaled noise.
         delta_a = new_params["a"]
         delta_b = new_params["b"]
 
-        # Both deltas should be non-trivial.
         assert jnp.any(delta_a != 0.0)
         assert jnp.any(delta_b != 0.0)
-
-        # The two same-shape leaves must NOT receive identical noise.
         assert not jnp.allclose(delta_a, delta_b), (
             "Same-shape leaves received identical noise — shrink-and-perturb "
             "is reusing a single PRNG key across leaves (issue #161)."
@@ -62,36 +61,59 @@ class TestShrinkAndPerturbKeySplit:
             "b": jnp.ones((3, 3)) * 2.0,
         }
         shrink_factor = 0.5
-        noise_scale = 0.1
-
-        key = jax.random.PRNGKey(7)
         new_params = _shrink_and_perturb_kernel(
-            key, params, shrink_factor, noise_scale
+            jax.random.PRNGKey(7), params, shrink_factor, 0.1
         )
 
-        # Subtract the deterministic shrink contribution to recover noise.
         noise_a = new_params["a"] - params["a"] * shrink_factor
         noise_b = new_params["b"] - params["b"] * shrink_factor
 
         assert not jnp.allclose(noise_a, noise_b)
 
-    def test_module_source_does_not_share_subkey(self):
-        """The DQN_Shrink_and_Perturb module must not feed ``subkey`` to noise."""
-        import pathlib
+    def test_kernel_jits_and_preserves_independence(self):
+        """The pattern must trace under ``jax.jit`` and still give independent noise.
 
-        # Locate the module source via the repo layout (works regardless of
-        # whether the editable install points at this worktree or elsewhere).
-        repo_root = pathlib.Path(__file__).resolve().parent.parent
-        module_path = (
-            repo_root / "src" / "algorithms" / "nn" / "DQN_Shrink_and_Perturb.py"
-        )
-        src = module_path.read_text()
+        Exercises the same code path the production
+        ``DQN_Shrink_and_Perturb._shrink_and_perturb`` runs under (jitted
+        ``tree_unflatten`` over the array returned by ``jax.random.split``).
+        """
+        params = {
+            "a": jnp.zeros((4, 4)),
+            "b": jnp.zeros((4, 4)),
+            "c": jnp.zeros((8,)),
+            "d": jnp.zeros((8,)),
+        }
+        new_params = _jitted_kernel(jax.random.PRNGKey(42), params, 0.5, 1.0)
 
-        # The buggy pattern fed the shared ``subkey`` directly into
-        # ``jax.random.normal`` for every leaf.
+        assert not jnp.allclose(new_params["a"], new_params["b"])
+        assert not jnp.allclose(new_params["c"], new_params["d"])
+
+    def test_production_function_uses_per_leaf_keys(self):
+        """``_shrink_and_perturb``'s body must derive a key per leaf, not reuse subkey.
+
+        Scoped to the function source via ``inspect.getsource`` so that comments
+        elsewhere in the module cannot accidentally satisfy or break this check.
+        Accepts either ``split`` + ``tree_map`` or ``fold_in`` + ``tree_map_with_path``.
+        """
+        from algorithms.nn.DQN_Shrink_and_Perturb import DQN_Shrink_and_Perturb
+
+        src = inspect.getsource(DQN_Shrink_and_Perturb._shrink_and_perturb)
+
         assert "jax.random.normal(subkey" not in src, (
-            "DQN_Shrink_and_Perturb._shrink_and_perturb is reusing the shared "
-            "subkey across all parameter leaves — this is the issue #161 bug."
+            "DQN_Shrink_and_Perturb._shrink_and_perturb feeds the shared "
+            "subkey directly into jax.random.normal — that's the issue #161 "
+            "bug. Each leaf must receive its own derived key."
+        )
+
+        derives_per_leaf_keys = (
+            "jax.random.split(subkey" in src
+            or "tree_map_with_path" in src
+            or "fold_in" in src
+        )
+        assert derives_per_leaf_keys, (
+            "Could not detect a per-leaf key derivation pattern in "
+            "_shrink_and_perturb. Expected jax.random.split(subkey, ...) or "
+            "fold_in/tree_map_with_path."
         )
 
 
