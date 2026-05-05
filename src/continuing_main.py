@@ -239,12 +239,22 @@ if not any(idx in video_idxs for idx in indices) and num_indices > 1:
 start_step = None
 save_every = first_hypers.get("experiment", {}).get("save_every", 10_001_000)
 video_every = first_hypers.get("experiment", {}).get("video_every", save_every)
+DORMANCY_KEYS = ("dormancy_pre_core", "dormancy_core", "dormancy_post_core")
+
 datas = {}
 datas["rewards"] = np.empty((len(indices), n), dtype=np.float16)
 datas["weight_change"] = np.empty((len(indices), n), dtype=np.float16)
 datas["squared_td_error"] = np.empty((len(indices), n), dtype=np.float16)
 datas["abs_td_error"] = np.empty((len(indices), n), dtype=np.float16)
 datas["loss"] = np.empty((len(indices), n), dtype=np.float16)
+
+agent_metrics_obj = getattr(glues[0].agent.state, "metrics", None)
+HAS_DORMANCY = agent_metrics_obj is not None and all(
+    hasattr(agent_metrics_obj, k) for k in DORMANCY_KEYS
+)
+if HAS_DORMANCY:
+    for k in DORMANCY_KEYS:
+        datas[k] = np.empty((len(indices), n), dtype=np.float16)
 
 
 def get_agent_metrics(agent_state, batch_shape):
@@ -253,6 +263,7 @@ def get_agent_metrics(agent_state, batch_shape):
     squared_td_error = jnp.zeros(batch_shape)
     abs_td_error = jnp.zeros(batch_shape)
     loss = jnp.zeros(batch_shape)
+    dormancy = {k: jnp.zeros(batch_shape) for k in DORMANCY_KEYS}
 
     if hasattr(agent_state, "metrics"):
         metrics = agent_state.metrics
@@ -264,8 +275,11 @@ def get_agent_metrics(agent_state, batch_shape):
             abs_td_error = metrics.abs_td_error
         if hasattr(metrics, "loss"):
             loss = metrics.loss
+        for k in DORMANCY_KEYS:
+            if hasattr(metrics, k):
+                dormancy[k] = getattr(metrics, k)
 
-    return weight_change, squared_td_error, abs_td_error, loss
+    return weight_change, squared_td_error, abs_td_error, loss, dormancy
 
 
 if isinstance(glues[0].environment, Foragax):
@@ -282,8 +296,8 @@ if isinstance(glues[0].environment, Foragax):
         )
 
     def get_data(carry, interaction):
-        weight_change, squared_td_error, abs_td_error, loss = get_agent_metrics(
-            carry.agent_state, interaction.reward.shape
+        weight_change, squared_td_error, abs_td_error, loss, dormancy = (
+            get_agent_metrics(carry.agent_state, interaction.reward.shape)
         )
         data = {
             "rewards": interaction.reward,
@@ -297,6 +311,9 @@ if isinstance(glues[0].environment, Foragax):
             "abs_td_error": abs_td_error,
             "loss": loss,
         }
+        if HAS_DORMANCY:
+            for k in DORMANCY_KEYS:
+                data[k] = dormancy[k]
 
         if isinstance(interaction.obs, Mapping) and "hint" in interaction.obs:
             hint = interaction.obs["hint"]
@@ -315,8 +332,8 @@ if isinstance(glues[0].environment, Foragax):
 else:
 
     def get_data(carry, interaction):
-        weight_change, squared_td_error, abs_td_error, loss = get_agent_metrics(
-            carry.agent_state, interaction.reward.shape
+        weight_change, squared_td_error, abs_td_error, loss, dormancy = (
+            get_agent_metrics(carry.agent_state, interaction.reward.shape)
         )
         data = {
             "rewards": interaction.reward,
@@ -325,6 +342,9 @@ else:
             "abs_td_error": abs_td_error,
             "loss": loss,
         }
+        if HAS_DORMANCY:
+            for k in DORMANCY_KEYS:
+                data[k] = dormancy[k]
         return data
 
 
@@ -340,6 +360,9 @@ def reset_datas():
     fresh_datas["squared_td_error"] = np.empty((len(indices), n), dtype=np.float16)
     fresh_datas["abs_td_error"] = np.empty((len(indices), n), dtype=np.float16)
     fresh_datas["loss"] = np.empty((len(indices), n), dtype=np.float16)
+    if HAS_DORMANCY:
+        for k in DORMANCY_KEYS:
+            fresh_datas[k] = np.empty((len(indices), n), dtype=np.float16)
     if isinstance(glues[0].environment, Foragax):
         fresh_datas["pos"] = np.empty((len(indices), n, 2), dtype=np.int32)
         fresh_datas["biome_id"] = np.empty((len(indices), n), dtype=np.int32)

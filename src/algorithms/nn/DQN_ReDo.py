@@ -11,6 +11,8 @@ import utils.chex as cxu
 from algorithms.nn.DQN import DQN
 from algorithms.nn.DQN import AgentState as BaseAgentState
 from algorithms.nn.DQN import Hypers as BaseHypers
+from algorithms.nn.NNAgent import Metrics as BaseMetrics
+
 
 @cxu.dataclass
 class Hypers(BaseHypers):
@@ -19,8 +21,16 @@ class Hypers(BaseHypers):
 
 
 @cxu.dataclass
+class Metrics(BaseMetrics):
+    dormancy_pre_core: jax.Array
+    dormancy_core: jax.Array
+    dormancy_post_core: jax.Array
+
+
+@cxu.dataclass
 class AgentState(BaseAgentState):
     hypers: Hypers  # type: ignore
+    metrics: Metrics  # type: ignore
 
 
 def reset_momentum(momentum: jax.Array, mask: jax.Array) -> jax.Array:
@@ -124,9 +134,21 @@ class DQN_ReDo(DQN):
             redo_threshold=float(params["redo_threshold"]),
         )
 
+        metrics = Metrics(
+            **self.state.metrics.__dict__,
+            dormancy_pre_core=jnp.float32(0.0),
+            dormancy_core=jnp.float32(0.0),
+            dormancy_post_core=jnp.float32(0.0),
+        )
+
         self.state = AgentState(
-            **{k: v for k, v in self.state.__dict__.items() if k != "hypers"},
+            **{
+                k: v
+                for k, v in self.state.__dict__.items()
+                if k not in ("hypers", "metrics")
+            },
             hypers=hypers,
+            metrics=metrics,
         )
 
         adam_state = self.state.optim[0]  # type: ignore
@@ -165,13 +187,17 @@ class DQN_ReDo(DQN):
 
         phi = state.params["phi"]
 
+        dormancy_fractions: Dict[str, jax.Array] = {}
+
         for plan in self._stage_plan:
+            stage = plan["stage"]  # type: ignore[index]
             act_key = plan["act_key"]  # type: ignore[index]
             linear_name = plan["linear_name"]  # type: ignore[index]
             ln_name = plan["ln_name"]  # type: ignore[index]
             linear_path = f"phi/~/{linear_name}"
 
             dormant = self._dormant(feat.activations[act_key], threshold)
+            dormancy_fractions[stage] = jnp.mean(dormant.astype(jnp.float32))
 
             # Incoming weights / bias of this stage's Linear.
             incoming_mask["phi"][linear_path]["w"] = jnp.broadcast_to(
@@ -260,11 +286,42 @@ class DQN_ReDo(DQN):
         )
         new_optim = (new_adam_state, *state.optim[1:])  # type: ignore
 
-        return replace(state, key=key, params=new_params, optim=new_optim)
+        new_metrics = replace(
+            state.metrics,
+            dormancy_pre_core=dormancy_fractions.get(
+                "pre_core", state.metrics.dormancy_pre_core
+            ),
+            dormancy_core=dormancy_fractions.get(
+                "core", state.metrics.dormancy_core
+            ),
+            dormancy_post_core=dormancy_fractions.get(
+                "post_core", state.metrics.dormancy_post_core
+            ),
+        )
+
+        return replace(
+            state, key=key, params=new_params, optim=new_optim, metrics=new_metrics
+        )
 
     def _update_state_with_metrics(self, state: AgentState) -> AgentState:
         prev_updates = state.updates
+        prev_dormancy = (
+            state.metrics.dormancy_pre_core,
+            state.metrics.dormancy_core,
+            state.metrics.dormancy_post_core,
+        )
         state = super()._update_state_with_metrics(state)
+        # Parent rebuilds metrics as the base Metrics (no dormancy fields);
+        # re-promote and carry the dormancy values forward.
+        state = replace(
+            state,
+            metrics=Metrics(
+                **state.metrics.__dict__,
+                dormancy_pre_core=prev_dormancy[0],
+                dormancy_core=prev_dormancy[1],
+                dormancy_post_core=prev_dormancy[2],
+            ),
+        )
         do_redo = (
             (state.updates != prev_updates)
             & (state.updates > 0)
