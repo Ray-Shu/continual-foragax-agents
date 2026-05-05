@@ -1298,13 +1298,6 @@ def main():
         rng = jax.random.PRNGKey(seed)
 
         freeze_steps = hypers.get("freeze_after_steps", hypers.get("freeze_steps", -1))
-        # if "freeze_steps_end" in hypers:
-        #     # TODO: this is to match the key for the env reset, that is the jax.random.PRNGKey(seed)[1] is used to reset the env
-        #     freeze_key = jax.random.PRNGKey(seed + 42)
-        #     freeze_steps_end = hypers["freeze_steps_end"]
-        #     freeze_steps = jax.random.randint(freeze_key, (), freeze_steps, freeze_steps_end + 1)
-        #     print(f"Freeze steps sampled to {freeze_steps}")
-
         rngs.append(rng)
 
         # derive num_updates if not explicitly present
