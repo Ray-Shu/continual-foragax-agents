@@ -1369,7 +1369,7 @@ def main():
             sparsity=hypers["representation"].get("sparsity", None),
             spectral_radius=hypers["representation"].get("spectral_radius", None),
             use_sinusoidal_encoding=bool(hypers.get("use_sinusoidal_encoding", False)),
-            use_reward_trace=bool(hypers.get("use_reward_trace", False)),
+            use_reward_trace=bool(hypers.get("use_reward_trace", hypers.get("representation", {}).get("use_reward_trace", False))),
             use_hint_trace=bool("_HT" in exp.agent),
             use_layernorm=bool(
                 hypers.get(
