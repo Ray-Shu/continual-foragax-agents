@@ -8,6 +8,17 @@
 
 module load python/3.11 arrow/19 gcc opencv rust swig
 
+# make sure home folder has a venv
+if [ ! -d ~/.venv ]; then
+  echo "making a new virtual env in ~/.venv"
+  python -m venv ~/.venv
+fi
+
+source ~/.venv/bin/activate
+echo "installing PyExpUtils"
+
+pip install PyExpUtils-andnp ml-instrument
+
 cp $path/pyproject.toml $SLURM_TMPDIR/
 cd $SLURM_TMPDIR
 python -m venv .venv
