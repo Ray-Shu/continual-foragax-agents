@@ -19,7 +19,7 @@ canonical worked example, used throughout this README, is
 
 ```
 1. Sweep                experiments/E136-big/foragax-sweep/ForagaxBig-v5/slurm.sh
-                        ↓ submits hyperparameter sweep jobs (10 seeds, 1M steps), we use k% tuning (TODO cite)
+                        ↓ submits hyperparameter sweep jobs (10 seeds, 1M steps), we use k%-tuning [1]
 
 2. Pick best hypers     experiments/E136-big/foragax-sweep/ForagaxBig-v5/hypers_job.sh
                         ↓ runs hypers.py + generate_frozen_configs.py
@@ -137,8 +137,9 @@ python scripts/slurm.py \
 **Sweep configs** under `9/` (the aperture size) carry hyperparameters as
 arrays. For example, `9/PPO_LN_128.json` sweeps `entropy_coef` over
 `[0.01, 0.1, 1.0]` and three Adam learning rates. `total_steps: 1_000_000`
-as per k-percent tuning; `experiment.seed_offset: 1_000_000` keeps sweep seeds
-disjoint from production seeds.
+as per k%-tuning [1] (10% of the 10M-step evaluation budget);
+`experiment.seed_offset: 1_000_000` keeps sweep seeds disjoint from
+evaluation seeds.
 
 **Cluster JSONs** in `clusters/` choose the resource shape:
 - `vulcan-gpu-vmap-24.json` — vmap'd PPO across multiple seeds on one GPU.
@@ -350,6 +351,33 @@ which packs multiple seeds onto one GPU.
 Under the experiment directory the config lives in, in the layout produced by
 `PyExpUtils`. `src/process_data.py` knows how to find them given the
 experiment root.
+
+---
+
+## References
+
+[1] Mesbahi, Golnaz, Panahi, Parham Mohammad, Mastikhina, Olya, Tang, Steven,
+White, Martha, & White, Adam. (2025). *Position: Lifetime tuning is
+incompatible with continual reinforcement learning.* In International
+Conference on Machine Learning.
+
+---
+
+## Citation
+
+If you use this repository in your research, please cite:
+
+```bibtex
+@misc{tang2026forager,
+      title={Forager: a lightweight testbed for continual learning with partial observability in RL},
+      author={Steven Tang and Xinze Xiong and Anna Hakhverdyan and Andrew Patterson and Jacob Adkins and Jiamin He and Esraa Elelimy and Parham Mohammad Panahi and Martha White and Adam White},
+      year={2026},
+      eprint={2605.01131},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2605.01131},
+}
+```
 
 ---
 
