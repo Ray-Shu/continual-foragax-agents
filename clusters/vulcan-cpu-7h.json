@@ -1,7 +1,5 @@
 {
     "type": "single_node",
-
-    "account": "aip-amw8",
     "time": "7:00:00",
     "cores": 16,
     "mem_per_core": "8G",
