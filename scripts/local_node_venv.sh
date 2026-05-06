@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --account=rrg-whitem
+#SBATCH --account=aip-whitem
 #SBATCH --mem-per-cpu=3G
 #SBATCH --ntasks=8
 #SBATCH --time=01:00:00
