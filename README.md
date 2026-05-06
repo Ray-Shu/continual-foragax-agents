@@ -102,10 +102,12 @@ cd continual-foragax-agents
    `pip install -e .` in `$SLURM_TMPDIR`, then copies the resulting `.venv`
    back into the project directory).
 
-> **Edit before running.** `scripts/local_node_venv.sh` and the per-experiment
-> `*_job.sh` files hardcode a CC allocation account (`rrg-whitem`,
-> `aip-amw8`). Change the `--account=` line to your own allocation before
-> submitting anything.
+> **Allocation accounts.** `scripts/slurm.py` auto-detects your SLURM
+> account from `sacctmgr` (priority `rrg-` > `aip-` > `def-`, randomized
+> within a tier per job to spread load). Pass `--account=<name>` on the
+> CLI to pin a specific account. `scripts/local_node_venv.sh` and the
+> per-experiment `*_job.sh` files still hardcode `--account=` and need
+> manual edits.
 
 Wait for the build job to finish, confirm there is a `.venv/` in the project
 root, and you are ready to schedule sweeps. Each new shell needs:

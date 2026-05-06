@@ -18,6 +18,7 @@ from PyExpUtils.runner.utils import approximate_cost
 from PyExpUtils.utils.generator import group
 from runner.Slurm import (
     SingleNodeOptions,
+    auto_detect_account,
     buildParallel,
     fromFile,
     get_script_name,
@@ -39,6 +40,12 @@ parser.add_argument("--force", action="store_true", default=False)
 parser.add_argument("--exclude", type=str, nargs="+", default=[])
 parser.add_argument("-i", "--idxs", type=int, nargs="+", default=None)
 parser.add_argument("--time", type=str, default=None)
+parser.add_argument(
+    "--account",
+    type=str,
+    default=None,
+    help="Override SLURM account (default: auto-detect via sacctmgr, random within rrg>aip>def tier).",
+)
 
 cmdline = parser.parse_args()
 
@@ -161,7 +168,13 @@ for path in missing:
         tasks = min([groupSize, len(job_indices)])
         par_tasks = max(math.ceil(tasks / slurm.sequential), 1)
         cores = math.ceil(par_tasks / tasks_per_core) * threads
-        sub = dataclasses.replace(slurm, cores=cores)
+        chosen_account = (
+            cmdline.account
+            if cmdline.account is not None
+            else (auto_detect_account() or "")
+        )
+        sub = dataclasses.replace(slurm, cores=cores, account=chosen_account)
+        print(f"  account: {chosen_account or '(none)'}")
 
         # build the executable string
         # instead of activating the venv every time, just use its python directly

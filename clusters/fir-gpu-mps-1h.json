@@ -1,7 +1,5 @@
 {
     "type": "single_node",
-
-    "account": "rrg-whitem",
     "time": "1:00:00",
     "gpus": "nvidia_h100_80gb_hbm3_1g.10gb:1",
     "cores": 3,
