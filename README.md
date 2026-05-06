@@ -145,7 +145,7 @@ evaluation seeds.
 - `vulcan-gpu-vmap-24.json` — vmap'd PPO across multiple seeds on one GPU.
 - `vulcan-cpu-32G.json` — DQN on CPU.
 - `vulcan-gpu-mps.json` — DRQN with NVIDIA MPS for GPU sharing.
-- `cedar.json`, `fir-*.json` — equivalents for Cedar and Fir.
+- `fir-*.json` — equivalents for Fir.
 
 Run with:
 
@@ -175,8 +175,8 @@ This is a 1-hour CPU job that runs:
    `choices.tex` / `default.tex` / `selected.tex` summary tables.
 2. **`scripts/generate_frozen_configs.py experiments/E136-big/foragax/ForagaxBig-v5/9`**
    — for every non-frozen config in that directory, writes a sibling
-   `<alg>_frozen_5M.json` that adds `freeze_steps: 5_000_000` and renames the
-   agent to `<alg>_frozen_5M`. These are used for the post-freeze transfer
+   `<alg>_frozen_500K.json` that adds `freeze_steps: 500_000` and renames the
+   agent to `<alg>_frozen_500K`. These are used for the post-freeze transfer
    phase of continual experiments.
 
 ### 3. Full run — `foragax/<env>/slurm.sh`
@@ -228,8 +228,12 @@ algorithms / apertures. Plots are written under the experiment directory.
 bash scripts/sync_results.sh
 ```
 
-You need to update it to point at your cluster and experiment directory.
-You can then re-run `process_data.py` and the plotting scripts locally if you prefer iterating on plots off-cluster.
+You need to update it to point at your cluster and experiment directory. As
+written, the script only rsyncs the aggregated `*.parquet` files (plus a few
+videos) — enough to re-run the plotting scripts locally, but **not** the raw
+per-seed result databases that `src/process_data.py` consumes. If you want to
+re-run `process_data.py` off-cluster, broaden the rsync include patterns to
+pull the underlying `results/` tree.
 
 ---
 
