@@ -231,9 +231,12 @@ bash scripts/sync_results.sh
 You need to update it to point at your cluster and experiment directory. The
 intended workflow is: run `process_data_job.sh` on the cluster (stage 4) so
 the heavy aggregation happens there, then `sync_results.sh` pulls only the
-resulting `*.parquet` files (plus a few videos) back. Local re-runs of
-`src/learning_curve.py` / `src/learning_bar.py` then iterate quickly
-off-cluster without needing the raw per-seed databases.
+resulting `*.parquet` files (plus a few videos) back. The raw per-seed
+databases are big enough that pulling them locally is impractical for
+RAM/disk reasons, but they stay on the cluster so you can change aggregation
+or add new metrics by re-running `process_data.py` without redoing the
+training runs. Local re-runs of `src/learning_curve.py` /
+`src/learning_bar.py` then iterate quickly off-cluster.
 
 ---
 
