@@ -53,7 +53,13 @@ def _sacctmgr_accounts() -> tuple[str, ...]:
         for line in (l.strip() for l in result.stdout.splitlines())
         if line
     }
-    return tuple(sorted(bare))
+    matching = tuple(sorted(a for a in bare if a.startswith(_ACCOUNT_PRIORITY)))
+    if bare and not matching:
+        print(
+            "WARNING: no rrg-/aip-/def- account found in sacctmgr output; --account will be omitted",
+            file=sys.stderr,
+        )
+    return matching
 
 
 def auto_detect_account() -> str | None:
@@ -64,10 +70,6 @@ def auto_detect_account() -> str | None:
         candidates = [a for a in accounts if a.startswith(prefix)]
         if candidates:
             return random.choice(candidates)
-    print(
-        "WARNING: no rrg-/aip-/def- account found in sacctmgr output; --account will be omitted",
-        file=sys.stderr,
-    )
     return None
 
 
@@ -106,6 +108,7 @@ def fromFile(path: str):
 
     assert "type" in d, "Need to specify scheduling strategy."
     t = d.pop("type")
+    # account is set per-job from CLI/auto-detect, never JSON
     d["account"] = ""
 
     if t == "single_node":
