@@ -1,252 +1,360 @@
-# rl-template
+# continual-foragax-agents
 
-# Getting started
-There are typically three stages of running experiments:
-1. Developing code locally
-2. Running code on the cluster
-3. Analyzing and plotting results
-
-This readme is structured in a similar fashion.
-I **highly** recommend going through all three steps with the example code **before** getting started on your project, unless you are an advanced user.
-
-**Note:** things go out of date quickly. The best way to contribute to this project is to document your setup journey and ping @andnp if something goes wrong, and how you fixed it.
-Or alternatively, put up a pull request in this repo updating the code or the instructions (and then ping me on slack anyways so I don't ignore you).
-
-## Setting up your own repo
-
-This repository is a github template repository.
-This means that you can click the green `Use this template` button on the github page for this repo to start a new repo that is a copy of this one.
-The difference between a template and a clone is that changes made in a template repository are not forwarded to the child repositories.
-That is, once you hit the green button you will be fully divorced from me. If I go and break everything in this template repo, I will not accidentally break _your_ code.
-
+JAX-based RL agents (DQN, DRQN, PPO, RTU-PPO) trained on the
+[continual-foragax](https://pypi.org/project/continual-foragax/) environment
+family. Sweep tooling is built on
+[PyExpUtils](https://github.com/andnp/pyexputils) and
+[RlEvaluation](https://pypi.org/project/RlEvaluation/) and follows the
+methodology in *Empirical Design in Reinforcement Learning* (Patterson et al.):
+sweep hyperparameters at small scale, pick the best configuration per
+algorithm, then run a larger production study with those frozen hypers.
 
 ---
-## Setting up repo locally
-**This codebase only works with python 3.11 and above.**
 
-Prereqs:
-* I assume you have python3.11 installed. If not, I strongly recommend setting up pyenv.
-* I assume you are familiar with virtual environments.
-* I assume you have rust installed. If not, I strongly recommend setting up rustup.
-* You must install swig globally to build box2d-py. For example, you can use [pipx](https://pipx.pypa.io/stable/installation/), `pipx install swig`, or [Homebrew](https://brew.sh), `brew install swig`. At this time the MacPorts versions of swig may have issues building box2d-py successfully. 
+## The workflow at a glance
 
-Packages are stored in a `requirements.txt` file.
-To install:
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+Every recent experiment in `experiments/` follows these five stages. The
+canonical worked example, used throughout this README, is
+`experiments/E136-big/`, which produced the results for Figure 7 in the RLC submission.
+
 ```
-Every time you open a new shell, _make sure you have activated the correct virtual environment_.
+1. Sweep                experiments/E136-big/foragax-sweep/ForagaxBig-v5/slurm.sh
+                        ↓ submits hyperparameter sweep jobs (10 seeds, 1M steps), we use k% tuning (TODO cite)
 
-Now let's test your installation:
-```bash
-python src/main.py -e experiments/example/MountainCar/EQRC.json -i 0
-```
-This should start spitting out several columns of numbers. Something like:
-```bash
-# episode number, total steps, return, time per step, frames per second
-DEBUG:exp:1 3221 -3222 1.187ms 841
-DEBUG:exp:2 3458 -237 1.151ms 868
-DEBUG:exp:3 3697 -239 1.111ms 899
-DEBUG:exp:4 3871 -174 1.084ms 922
-DEBUG:exp:5 8208 -4337 0.8237ms 1213
-DEBUG:exp:6 8864 -656 0.8148ms 1227
-DEBUG:exp:7 9071 -207 0.8086ms 1236
-DEBUG:exp:8 9252 -181 0.8033ms 1244
-DEBUG:exp:9 9401 -149 0.7999ms 1249
-DEBUG:exp:10 9739 -338 0.7915ms 1263
-DEBUG:exp:11 10064 -325 0.7835ms 1276
-DEBUG:exp:12 10888 -824 0.7743ms 1291
-DEBUG:exp:13 11131 -243 0.7693ms 1299
-```
-Let this run to completion, should only be a couple of minutes.
-This is your primary command to do fast iteration of code. Make your changes, call this script (though probably with a different `.json` file that corresponds to your experiment).
+2. Pick best hypers     experiments/E136-big/foragax-sweep/ForagaxBig-v5/hypers_job.sh
+                        ↓ runs hypers.py + generate_frozen_configs.py
+                        ↓ writes configs with selected hypers and frozen configs into experiments/E136-big/foragax/ForagaxBig-v5/
 
+3. Full run             experiments/E136-big/foragax/ForagaxBig-v5/slurm.sh
+                        ↓ submits evaluation jobs (30 new seeds, 10M steps)
 
-To do experiments with continuing tasks or Optuna hyperparameter tuning, use:
-```bash
-python src/continuing_main.py -e experiments/continuing_example/Forager/EQRC.json -i  0
-python src/optuna_tuning.py -e experiments/optuna_example/MountainCar/DQN.json -i 0
+4. Process data         experiments/E136-big/foragax/ForagaxBig-v5/process_data_job.sh
+                        ↓ runs src/process_data.py
+
+5. Plot                 experiments/E136-big/foragax/ForagaxBig-v5/plot.sh
+                        ↓ runs src/learning_curve.py + src/learning_bar.py
 ```
+
+The two top-level directories — `foragax-sweep/` and `foragax/` — are the same
+shape (`<experiment>/<env>/<aperture>/<alg>.json`). The sweep side carries
+hyperparameter arrays and uses 1M steps; the evaluation side carries single
+values selected by `hypers.py` and runs to 10M steps.
 
 ---
-## Set up on compute canada
-This is much more difficult.
-**Plan to dedicate a couple of hours to setup.**
 
-If all goes according to plan, the `scripts/setup_cc.sh` script should be enough.
-But things rarely go according to plan.
+## Local development
+
+### Prerequisites
+- Python 3.11 (`pyproject.toml` requires `>=3.11, <3.13`).
+- Rust (`rustup`).
+- `swig` installed globally — `pipx install swig` or `brew install swig`. Needed
+  to build `box2d-py`.
+
+### Install
+The project is a `pyproject.toml` package, so install editable into a venv:
+
 ```bash
-ssh $cedar
-cd projects/andnp
-# You should replace this github url with your repo that is a copy of the template repo
-git clone https://github.com/andnp/rl-control-template.git
-cd rl-control-template
+uv sync
+```
 
+If you want pre-commit hooks:
+
+```bash
+bash dev-setup.sh
+```
+
+### Smoke test
+Run a single seed of a real experiment locally:
+
+```bash
+uv run src/rtu_ppo.py -e experiments/E136-big/foragax-sweep/ForagaxBig-v5/9/PPO_LN_128.json -i 0
+```
+
+You should see training logs printing a progress bar. Let it run for a
+minute, then cancel — this is your fast iteration loop while editing code.
+
+The two in-use top-level entry points are:
+- `src/rtu_ppo.py` — PPO and RTU-PPO.
+- `src/continuing_main.py` — DQN and DRQN (continuing-task setting).
+
+---
+
+## Compute Canada setup
+
+This works on Vulcan, and Fir — pick the matching cluster JSON
+in `clusters/` when you submit jobs. The examples below lead with Vulcan
+because that is what the `E136-big` example scripts use.
+
+```bash
+ssh vulcan
+git clone git@github.com:steventango/continual-foragax-agents.git
+cd continual-foragax-agents
 ./scripts/setup_cc.sh
-sq
-```
-After `setup_cc.sh` has run, you should see that you have a short job scheduled.
-Go grab a coffee while you wait for this job to run.
-
-Once you have a `venv.tar.xz` in your project directory, you are ready to continue.
-```bash
-# activate your **global** virtualenv
-source ~/.venv/bin/activate
-
-# schedule a **small** job
-python scripts/slurm.py --clusters clusters/cedar.json --runs 5 -e experiments/example/Acrobot/*.json experiments/example/Cartpole/*.json experiments/example/MountainCar/*.json
-
-# check that you have a few jobs scheduled (around 20)
-sq
 ```
 
-Once those jobs complete, you should have a `results/` folder with several `.db` files nested deeply within.
-To make sure you have all of the results that you expect, just call the scheduling script again (don't forget your global virtualenv):
-```bash
-source ~/.venv/bin/activate
-python scripts/slurm.py --clusters clusters/cedar.json --runs 5 -e experiments/example/Acrobot/*.json experiments/example/Cartpole/*.json experiments/example/MountainCar/*.json
-```
-This script should report that there is no more work to complete.
+`scripts/setup_cc.sh` does two things:
 
-Finally, zip up and download your results:
-```bash
-tar -cavf results.tar.xz results
-# go back to your computer
-exit
-# download the results
-scp $cedar:~/projects/andnp/rl-control-template/results.tar.xz ./
-# and unzip
-tar -xvf results.tar.xz
-```
+1. Loads `python/3.11 arrow/19 gcc`, creates `~/.venv` (the **launcher** venv,
+   used by `scripts/slurm.py` itself), and pip-installs `PyExpUtils-andnp` and
+   `ml-instrument` into it.
+2. Submits `scripts/local_node_venv.sh` as a short Slurm job that builds the
+   project `.venv` on a compute node (loads `opencv rust swig`, runs
+   `pip install -e .` in `$SLURM_TMPDIR`, then copies the resulting `.venv`
+   back into the project directory).
 
-Now you have all of the results locally and are ready to analyze them.
-Results are stored in several sqlite3 databases. You can go open these yourself and use whatever plotting libraries you are comfortable with.
-I also have a few utilities here for common operations (hyperparameter studies, learning curves, etc.) that load the databases into pandas `DataFrame`s.
-If you are comfortable with pandas, I recommend using my code to load the results and start from there.
+> **Edit before running.** `scripts/local_node_venv.sh` and the per-experiment
+> `*_job.sh` files hardcode a CC allocation account (`rrg-whitem`,
+> `aip-amw8`). Change the `--account=` line to your own allocation before
+> submitting anything.
+
+Wait for the build job to finish, confirm there is a `.venv/` in the project
+root, and you are ready to schedule sweeps. Each new shell needs:
 
 ```bash
-python experiments/example/learning_curve.py
+source ~/.venv/bin/activate      # the launcher venv
+sq                               # check job status
 ```
 
 ---
-## Dependencies
-This template repo depends on a few other shared libraries to make code-splitting and sharing a little easier (for me).
-The documentation and source code can be found at the following links.
-* [RLGlue](https://github.com/andnp/rlglue) - my own minimal implementation of RLGlue
-* [PyExpUtils](https://github.com/andnp/pyexputils) - a library containing the experiment running framework
-* [PyFixedReps](https://github.com/andnp/pyfixedreps) - a few fixed representation algorithms implemented in python (e.g. tile-coding, rbfs, etc.)
 
+## The sweep workflow
+
+The five stages, each with its file in the canonical example.
+
+### 1. Sweep — `foragax-sweep/<env>/slurm.sh`
+
+`experiments/E136-big/foragax-sweep/ForagaxBig-v5/slurm.sh` is a list of calls
+to `scripts/slurm.py`, one per algorithm:
+
+```bash
+python scripts/slurm.py \
+    --cluster clusters/vulcan-gpu-vmap-24.json \
+    --time 03:00:00 --runs 10 --force \
+    --entry src/rtu_ppo.py \
+    -e experiments/E136-big/foragax-sweep/ForagaxBig-v5/9/PPO-RTU_LN_128_HT.json
+```
+
+**Sweep configs** under `9/` (the aperture size) carry hyperparameters as
+arrays. For example, `9/PPO_LN_128.json` sweeps `entropy_coef` over
+`[0.01, 0.1, 1.0]` and three Adam learning rates. `total_steps: 1_000_000`
+as per k-percent tuning; `experiment.seed_offset: 1_000_000` keeps sweep seeds
+disjoint from production seeds.
+
+**Cluster JSONs** in `clusters/` choose the resource shape:
+- `vulcan-gpu-vmap-24.json` — vmap'd PPO across multiple seeds on one GPU.
+- `vulcan-cpu-32G.json` — DQN on CPU.
+- `vulcan-gpu-mps.json` — DRQN with NVIDIA MPS for GPU sharing.
+- `cedar.json`, `fir-*.json` — equivalents for Cedar and Fir.
+
+Run with:
+
+```bash
+bash experiments/E136-big/foragax-sweep/ForagaxBig-v5/slurm.sh
+```
+
+`scripts/slurm.py` only schedules **missing** seeds — re-running the same
+script after jobs finish picks up whatever didn't complete. When everything is
+done it reports nothing to schedule.
+
+### 2. Pick best hypers + generate frozen configs — `foragax-sweep/<env>/hypers_job.sh`
+
+Once the sweep results are in, submit:
+
+```bash
+sbatch experiments/E136-big/foragax-sweep/ForagaxBig-v5/hypers_job.sh
+```
+
+This is a 1-hour CPU job that runs:
+
+1. **`hypers.py`** — uses `RlEvaluation.hypers.select_best_hypers` on the
+   `mean_ewm_reward` metric (mean statistic, threshold 0.05, prefer high) per
+   algorithm. It writes the chosen flat config to
+   `foragax-sweep/<env>/hypers/<aperture>/<alg>.json`, updates the production
+   config at `foragax/<env>/<aperture>/<alg>.json`, and emits
+   `choices.tex` / `default.tex` / `selected.tex` summary tables.
+2. **`scripts/generate_frozen_configs.py experiments/E136-big/foragax/ForagaxBig-v5/9`**
+   — for every non-frozen config in that directory, writes a sibling
+   `<alg>_frozen_5M.json` that adds `freeze_steps: 5_000_000` and renames the
+   agent to `<alg>_frozen_5M`. These are used for the post-freeze transfer
+   phase of continual experiments.
+
+### 3. Full run — `foragax/<env>/slurm.sh`
+
+`experiments/E136-big/foragax/ForagaxBig-v5/slurm.sh` mirrors stage 1, but
+points at the production configs (single hyperparameter values,
+`total_steps: 10_000_000`, `seed_offset: 0`) and bumps the budget to
+`--runs 30 --time 06:00:00`.
+
+```bash
+bash experiments/E136-big/foragax/ForagaxBig-v5/slurm.sh
+```
+
+Idempotent in the same way — re-run to fill in missing seeds.
+
+### 4. Process data — `foragax/<env>/process_data_job.sh`
+
+```bash
+sbatch experiments/E136-big/foragax/ForagaxBig-v5/process_data_job.sh
+```
+
+A 100 GB / 16-task / 1-hour CPU job that runs:
+
+```bash
+python src/process_data.py experiments/E136-big/foragax/ForagaxBig-v5
+```
+
+`process_data.py` loads each algorithm's results, downsamples around milestone
+steps (1M / 5M / 10M with widening intervals), and emits the aggregated
+parquet that the plotting scripts consume.
+
+### 5. Plot — `foragax/<env>/plot.sh`
+
+```bash
+bash experiments/E136-big/foragax/ForagaxBig-v5/plot.sh
+```
+
+Each line invokes `src/learning_curve.py` or `src/learning_bar.py` with
+`--filter-alg-apertures <alg>:<aperture>` and `--metric ewm_reward_5` to
+produce one figure per comparison. Tweak the filter list to add or remove
+algorithms / apertures. Plots are written under the experiment directory.
 
 ---
-## Organization Patterns
 
-### Experiments
-All experiments are described as completely as possible within static data files.
-I choose to use `.json` files for human readability and because I am most comfortable with them.
-These are stored in the `experiments` folder, usually in a subdirectory with a short name for the experiment being run (e.g. `experiments/idealH` would specify an experiment that tests the effects of using h*).
+## Pulling results back to your laptop
 
-Experiment `.json` files look something like:
+```bash
+# on your laptop
+bash scripts/sync_results.sh
+```
+
+You need to update it to point at your cluster and experiment directory.
+You can then re-run `process_data.py` and the plotting scripts locally if you prefer iterating on plots off-cluster.
+
+---
+
+## Repo layout
+
+```
+src/
+    continuing_main.py      # DQN / DRQN entry point
+    rtu_ppo.py              # PPO / RTU-PPO entry point
+    process_data.py         # aggregate per-alg results into parquet
+    learning_curve.py       # learning-curve plot
+    learning_bar.py         # bar plot
+    algorithms/             # agent implementations
+    representations/        # encoders / RTU / etc.
+    environments/           # environment shims
+    problems/               # registry of (env, representation, gamma, ...) tuples
+    experiment/             # ExperimentModel + sweep utilities
+    utils/                  # shared helpers (results, paths, checkpointing)
+
+experiments/E<NNN>-<name>/
+    foragax-sweep/<env>/<aperture>/<alg>.json    # sweep configs (arrays)
+    foragax-sweep/<env>/slurm.sh                 # stage 1
+    foragax-sweep/<env>/hypers.py                # called by stage 2
+    foragax-sweep/<env>/hypers_job.sh            # stage 2
+    foragax-sweep/<env>/hypers/<aperture>/*.json # selected best hypers
+    foragax/<env>/<aperture>/<alg>.json          # evaluation configs (best hypers)
+    foragax/<env>/slurm.sh                       # stage 3
+    foragax/<env>/process_data_job.sh            # stage 4
+    foragax/<env>/plot.sh                        # stage 5
+
+clusters/                   # Slurm resource templates (vulcan / cedar / fir)
+scripts/
+    slurm.py                # cluster job submission
+    local.py                # local multi-seed driver
+    setup_cc.sh             # one-time CC bootstrap
+    local_node_venv.sh      # builds project .venv on a compute node
+    generate_frozen_configs.py
+    ...                     # other one-off helpers
+```
+
+A sweep config is a single JSON file describing one algorithm and its
+hyperparameter ranges:
+
 ```jsonc
 {
-    "agent": "gtd2", // <-- name of your agent. these names are defined in agents/registry.py
-    "problem": "randomwalk", // <-- name of the problem you're solving. these are defined in problems/registry.py
-    "metaParameters": { // <-- a dictionary containing all of the meta-parameters for this particular algorithm
-        "alpha": [1, 0.5, 0.25], // <-- sweep over these 3 values of alpha
-        "beta": 1.0, // <-- don't sweep over beta, always use 1.0
-        "use_ideal_h": true,
-        "lambda": [0.0, 0.1]
+    "agent": "PPO_LN_128",
+    "problem": "Foragax",
+    "total_steps": 1000000,
+    "metaParameters": {
+        "environment": { "env_id": "ForagaxBig-v5", "aperture_size": 9, "observation_type": "rgb" },
+        "experiment":  { "seed_offset": 1000000 },
+        "entropy_coef": [0.01, 0.1, 1.0],          // sweep
+        "optimizer_actor": {
+            "name": "Adam",
+            "alpha": [1e-3, 3e-4, 1e-4],           // sweep
+            "beta1": 0.9, "beta2": 0.999, "eps": 1e-5
+        }
+        // ... fixed hyperparameters
     }
 }
 ```
 
-### Problems
-I define a **problem** as a combination of:
-1) environment
-2) representation
-3) target/behavior policies
-4) number of steps
-5) gamma
-6) starting conditions for the agent (like in Baird's)
-
-### results
-The results are saved in a path that is defined by the experiment definition used.
-The configuration for the results is specified in `config.json`.
-Using the current `config.json` yields results paths that look like:
-```
-<base_path>/results/<experiment short name>/<agent name>/<parameter values>/errors_summary.npy
-```
-Where `<base_path>` is defined when you run an experiment.
-
-### src
-This is where the source code is stored.
-The only `.py` files it contains are "top-level" scripts that actually run an experiment.
-No utility files or shared logic at the top-level.
-
-**agents:** contains each of the agents.
-Preferably, these would be one agent per file.
-
-**analysis:** contains shared utility code for analysing the results.
-This *does not* contain scripts for analysing results, only shared logic (e.g. plotting code or results filtering).
-
-**environments:** contains minimal implementations of just the environment dynamics.
-
-**utils:** various utility code snippets for doing things like manipulating file paths or getting the last element of an array.
-These are just reusable code chunks that have no other clear home.
-I try to sort them into files that roughly name how/when they will be used (e.g. things that manipulate files paths goes in `paths.py`, things that manipulate arrays goes in `arrays.py`, etc.).
-
+The production config (auto-written by stage 2) has the same shape but with a
+single value for each previously-swept field, `total_steps: 10_000_000`, and
+`seed_offset: 0`.
 
 ---
-## FAQs
 
-* What are the best settings for `clusters/cedar.json`?
+## Dependencies
 
-  As per the best practices document from compute canada, I make sure my CC jobs _always_ take at least one hour to complete.
-  Because many of my **tasks** take about 5 minutes, I generally set the `sequential` parameter to ~16 to accomplish this (16*5m = 1h20m).
-  I also try to make sure my jobs take no longer than 12hrs to complete (if I can help it).
-  The optimal---if I can wait---is to make the jobs take just under 3hrs so that my jobs are in the highest priority queue, but put the least strain on the scheduler.
-  Always leave a bit of wiggle room.
+The load-bearing libraries (full list in `pyproject.toml`):
 
-  There is a fine balance between CC job size and the number of CC jobs scheduled.
-  Large CC jobs take longer to be scheduled, but a large number of small jobs put unnecessary strain on the scheduler.
-  I try to limit my number of scheduled jobs to ~100 (we have a max of 2000 per person).
-  To figure out how many tasks will be scheduled for an experiment, you can run:
+- [PyExpUtils-andnp](https://github.com/andnp/pyexputils) — experiment-running
+  framework (sweep expansion, missing-seed detection, Slurm submission).
+- [RlEvaluation](https://pypi.org/project/RlEvaluation/) — best-hypers
+  selection in `hypers.py`.
+- [RlGlue-andnp](https://github.com/andnp/rlglue) — agent / environment
+  protocol.
+- [ReplayTables-andnp](https://pypi.org/project/ReplayTables-andnp/) — replay
+  buffers for off-policy agents.
+- [ml-instrument](https://pypi.org/project/ml-instrument/) — metric collection.
+- [continual-foragax](https://pypi.org/project/continual-foragax/) — the
+  environment.
+- [JAX](https://github.com/jax-ml/jax), [Optax](https://github.com/google-deepmind/optax),
+  [Flax](https://github.com/google/flax), [dm-haiku](https://github.com/google-deepmind/dm-haiku),
+  [flashbax](https://github.com/instadeepai/flashbax) — JAX stack.
+
+---
+
+## FAQ
+
+**What's a good size for cluster jobs?**
+Aim for jobs that run between 1 and 12 hours; ~3 hours is the sweet spot on
+the Compute Canada queue. The vmap-based JSONs in `clusters/` (e.g.
+`vulcan-gpu-vmap-24.json`) bundle many seeds into one job and are highly efficient. To estimate task count for a config:
+
 ```python
-import src.experiment.ExperimentModel as Experiment
-
-exp = Experiment.load('experiments/path/to.json')
+import experiment.ExperimentModel as Experiment
+exp = Experiment.load('experiments/E136-big/foragax-sweep/ForagaxBig-v5/9/PPO_LN_128.json')
 print(exp.numPermutations())
 ```
 
-* How do you get your code from your laptop to the compute canada server?
+**How do I get code from my laptop to the cluster?**
+Git. Push to a remote (private GitHub fork is fine), pull on the cluster. Tag
+checkpoints (`git tag icml-2026-submission`) before destabilising changes.
 
-  Git is your friend.
-  All of my code is always checked-in to git, and I have my experiment code cloned on my laptop and on the CC server.
-  I use GitHub private repos to house the code remotely.
-  I make liberal use of git tags to mark checkpoints in the repo's lifespan (e.g. before I add a new contributor: `git tag before-aj-messed-things-up`, or when I submit a paper `git tag icml-2020`).
-  This helps maintain my sanity when code changes and evolves over time, because now all codebase states are still accessible.
+**Some of my jobs failed / timed out.**
+Just re-run the same `slurm.sh`. `scripts/slurm.py` detects missing seeds and
+schedules only those. If it exits immediately and reports no work, that means
+nothing is missing — clear out (or rename) the relevant entries under
+`results/` if you want to force re-runs.
 
-* What if one of my jobs fails or some of the tasks did not finish in time?
+**Can I use GPUs?**
+Yes — every `clusters/vulcan-gpu-*` and `clusters/fir-gpu-*` JSON is a
+GPU-allocated template. PPO/RTU-PPO benefit most from `vulcan-gpu-vmap-*`,
+which packs multiple seeds onto one GPU.
 
-  One of the major advantages to the way this experiment framework is set up is that you can trivially determine exactly which results are missing after scheduling a job.
-  In fact, the job scheduling script in this template repo already handles this by default.
-  If you have results that are missing, simply run the scheduling script again with no changes and it will schedule only the missing tasks.
+**Where does each experiment write its results?**
+Under the experiment directory the config lives in, in the layout produced by
+`PyExpUtils`. `src/process_data.py` knows how to find them given the
+experiment root.
 
-* I'm running the scheduling script, but it exits immediately and no jobs are scheduled?
+---
 
-  See the above.
-  Chances are, your `results/` folder is not empty so there are no "missing results" to be scheduled.
-  If you want to force the scheduling script to go forward anyways, either run `mv results results.old` or `rm -rf results/` to get rid of the results (or some other less aggressive strategy).
+## Contributing
 
-* Can your code use GPUs?
-
-  Yup! Just change the bash script that is generated in `scripts/slurm.py` to request GPUs from compute canada.
-
-* Can your code use multi-threading?
-
-  Currently the scheduling script is not designed to handle multi-threading.
-  Because my tasks tend to be relatively short (a few hours at most), and because it is generally better to have many single-threaded processes than one multi-threaded process, I have had no need to design a script to handle multi-threading.
-  However, the underlying experiment framework, `PyExpUtils`, **does** have support for handling multi-threaded tasks.
-  You will need to make a few modifications to `scripts/slurm.py` to change how many tasks are bundled into each job to account for using multiple threads.
-  Talk to Andy if you need help!
+See `CONTRIBUTING.md`. Things go out of date fast — when you hit a snag
+during setup or a workflow stage, please update this README in the same PR
+that fixes it.
