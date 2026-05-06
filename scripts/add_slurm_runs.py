@@ -25,8 +25,10 @@ def main():
             # Determine runs and cluster based on whether it's foragax or foragax-sweep
             is_foragax = "foragax/" in slurm_path and "foragax-sweep/" not in slurm_path
             runs = 30 if is_foragax else 5
-            cluster_frozen = (
-                "vulcan-cpu-3h.json" if is_foragax else "vulcan-gpu-vmap-3h.json"
+            cluster_frozen, cluster_time = (
+                ("vulcan-cpu.json", "3:00:00")
+                if is_foragax
+                else ("vulcan-gpu-vmap.json", "3:00:00")
             )
 
             updated = False
@@ -37,7 +39,10 @@ def main():
                     for config_file in os.listdir(config_subdir):
                         if config_file.endswith(".json") and "_frozen_" in config_file:
                             config_path = os.path.join(config_subdir, config_file)
-                            slurm_line = f"python scripts/slurm.py --cluster clusters/{cluster_frozen} --runs {runs} --entry src/continuing_main.py --force -e {config_path}"
+                            time_arg = (
+                                f" --time={cluster_time}" if cluster_time else ""
+                            )
+                            slurm_line = f"python scripts/slurm.py --cluster clusters/{cluster_frozen}{time_arg} --runs {runs} --entry src/continuing_main.py --force -e {config_path}"
                             if slurm_line not in content:
                                 content += f"{slurm_line}\n"
                                 updated = True

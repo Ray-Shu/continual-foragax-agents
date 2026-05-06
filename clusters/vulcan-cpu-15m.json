@@ -1,8 +1,0 @@
-{
-    "type": "single_node",
-    "time": "0:15:00",
-    "cores": 16,
-    "mem_per_core": "8G",
-    "tasks_per_core": 1,
-    "sequential": 1
-}

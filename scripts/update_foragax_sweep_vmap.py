@@ -14,12 +14,10 @@ def main():
         with open(slurm_path, "r") as f:
             content = f.read()
 
-        # Replace CPU cluster configs with vmap configs
-        # vulcan-cpu-1h.json -> vulcan-gpu-vmap-3h.json
-        # vulcan-cpu-3h.json -> vulcan-gpu-vmap-3h.json (for consistency)
+        # Replace CPU cluster configs with the canonical vmap config (3h time).
         updated_content = re.sub(
-            r"clusters/vulcan-cpu-(?:1h|3h)\.json",
-            "clusters/vulcan-gpu-vmap-3h.json",
+            r"clusters/vulcan-cpu(?:-c8)?\.json(?: --time=\d+:\d+:\d+)?",
+            "clusters/vulcan-gpu-vmap.json --time=3:00:00",
             content,
         )
 
