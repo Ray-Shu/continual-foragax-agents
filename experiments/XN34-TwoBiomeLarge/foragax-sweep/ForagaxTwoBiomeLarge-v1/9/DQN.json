@@ -38,9 +38,10 @@
         "representation": {
             "type": "ForagerNet",
             "hidden": 64,
-            "layers": 2,
-            "use_layernorm": true,
-            "conv": "PConv2DConv2D"
+            "layers": 1,
+            "use_layernorm": false,
+            "conv": "Conv2D",
+            "scalar_features": ""
         },
         "update_freq": 4
     }
