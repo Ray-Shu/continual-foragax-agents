@@ -4,14 +4,15 @@
     "total_steps": 10000,
     "episode_cutoff": -1,
     "metaParameters": {
-        "epsilon": [
-            0.05,
-            0.1,
-            0.25
+        "initial_epsilon": 1.0,
+        "final_epsilon": 0.05,
+        "epsilon_linear_decay": 8000,
+        "target_refresh": [
+            1,
+            128
         ],
-        "target_refresh": 128,
-        "buffer_size": 1000,
-        "buffer_min_size": 50,
+        "buffer_size": 10000,
+        "buffer_min_size": 32,
         "batch": 32,
         "environment": {
             "env_id": "ForagaxTwoBiomeLarge-v1",
@@ -25,15 +26,21 @@
         "optimizer": {
             "name": "Adam",
             "alpha": [
-                0.003,
                 0.001,
                 0.0003,
                 0.0001,
-                3e-05
+                3e-05,
+                1e-05
             ],
             "beta1": 0.9,
-            "beta2": 0.999,
-            "eps": 1e-05
+            "beta2": [
+                0.9,
+                0.999
+            ],
+            "eps": [
+                0.01,
+                1e-08
+            ]
         },
         "representation": {
             "type": "ForagerNet",
@@ -43,6 +50,9 @@
             "conv": "Conv2D",
             "scalar_features": ""
         },
-        "update_freq": 4
+        "update_freq": [
+            1,
+            4
+        ]
     }
 }
