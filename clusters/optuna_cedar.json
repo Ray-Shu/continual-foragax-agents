@@ -1,7 +1,5 @@
 {
     "type": "single_node",
-
-    "account": "rrg-whitem",
     "time": "2:59:00",
     "cores": 10,
     "mem_per_core": "2G",

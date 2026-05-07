@@ -1,2 +1,2 @@
-python scripts/slurm.py --cluster clusters/vulcan-cpu-30m.json --runs 30 --entry src/continuing_main.py --force -e experiments/E101-two-biome/foragax/ForagaxTwoBiome-v13/Baselines/Search-Brown-Avoid-Green.json
-python scripts/slurm.py --cluster clusters/vulcan-cpu-3h.json --runs 30 --entry src/continuing_main.py --force -e experiments/E101-two-biome/foragax/ForagaxTwoBiome-v13/Baselines/Search-Oracle.json
+python scripts/slurm.py --cluster clusters/vulcan-cpu.json --time=0:30:00 --runs 30 --entry src/continuing_main.py --force -e experiments/E101-two-biome/foragax/ForagaxTwoBiome-v13/Baselines/Search-Brown-Avoid-Green.json
+python scripts/slurm.py --cluster clusters/vulcan-cpu.json --time=3:00:00 --runs 30 --entry src/continuing_main.py --force -e experiments/E101-two-biome/foragax/ForagaxTwoBiome-v13/Baselines/Search-Oracle.json

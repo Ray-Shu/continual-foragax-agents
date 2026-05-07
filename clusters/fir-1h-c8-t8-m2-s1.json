@@ -1,7 +1,5 @@
 {
     "type": "single_node",
-
-    "account": "rrg-whitem",
     "time": "1:00:00",
     "cores": 8,
     "threads_per_task": 8,

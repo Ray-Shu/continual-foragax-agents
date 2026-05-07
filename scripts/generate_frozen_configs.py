@@ -19,8 +19,8 @@ def generate_frozen_configs(config_dir):
         with open(config_file, "r") as f:
             config = json.load(f)
 
-        # Generate configs for 500K freeze steps
-        for freeze_steps, suffix in [(500000, "500K")]:
+        # Generate configs for 5M freeze steps
+        for freeze_steps, suffix in [(5000000, "5M")]:
             frozen_config = config.copy()
             frozen_config["agent"] += f"_frozen_{suffix}"
 

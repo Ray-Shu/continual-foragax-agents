@@ -1,6 +1,10 @@
+import functools
 import json
 import math
 import os
+import random
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -23,12 +27,56 @@ class MultiNodeOptions(Slurm.MultiNodeOptions):
     tasks_per_vmap: int = 1
 
 
+_ACCOUNT_PRIORITY = ("rrg-", "aip-", "def-")
+
+
+@functools.lru_cache(maxsize=1)
+def _sacctmgr_accounts() -> tuple[str, ...]:
+    user = os.environ.get("USER", "")
+    try:
+        result = subprocess.run(
+            ["sacctmgr", "-nP", "show", "assoc", f"user={user}", "format=account"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        print(
+            f"WARNING: could not query sacctmgr ({e}); --account will be omitted",
+            file=sys.stderr,
+        )
+        return ()
+
+    bare = {
+        line.removesuffix("_cpu").removesuffix("_gpu")
+        for line in (l.strip() for l in result.stdout.splitlines())
+        if line
+    }
+    matching = tuple(sorted(a for a in bare if a.startswith(_ACCOUNT_PRIORITY)))
+    if bare and not matching:
+        print(
+            "WARNING: no rrg-/aip-/def- account found in sacctmgr output; --account will be omitted",
+            file=sys.stderr,
+        )
+    return matching
+
+
+def auto_detect_account() -> str | None:
+    accounts = _sacctmgr_accounts()
+    if not accounts:
+        return None
+    for prefix in _ACCOUNT_PRIORITY:
+        candidates = [a for a in accounts if a.startswith(prefix)]
+        if candidates:
+            return random.choice(candidates)
+    return None
+
+
 def check_account(account: str):
-    assert (
-        account.startswith("rrg-")
-        or account.startswith("def-")
-        or account.startswith("aip-")
-    )
+    if not account:
+        return
+    assert account.startswith(_ACCOUNT_PRIORITY)
     assert not account.endswith("_cpu") and not account.endswith("_gpu")
 
 
@@ -59,8 +107,9 @@ def fromFile(path: str):
         d = json.load(f)
 
     assert "type" in d, "Need to specify scheduling strategy."
-    t = d["type"]
-    del d["type"]
+    t = d.pop("type")
+    # account is set per-job from CLI/auto-detect, never JSON
+    d["account"] = ""
 
     if t == "single_node":
         return SingleNodeOptions(**d)
@@ -78,8 +127,10 @@ def to_cmdline_flags(
     if not skip_validation:
         validate(options)
 
-    args = [
-        ("--account", options.account),
+    args: list[tuple[str, Any]] = []
+    if options.account:
+        args.append(("--account", options.account))
+    args += [
         ("--time", options.time),
         ("--mem-per-cpu", options.mem_per_core),
         ("--output", options.log_path),
