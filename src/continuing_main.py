@@ -502,16 +502,17 @@ while current_step < n:
             data = get_data(carry, interaction)
             return carry, data
 
-        agent_step_count = int(np.asarray(glue_states.agent_state.steps).reshape(-1)[0])
-        freeze_steps = first_hypers.get("freeze_steps", np.inf)
-        if freeze_steps is None:
-            freeze_steps = np.inf
-        freeze_steps = float(freeze_steps)
-        can_use_explicit_steps = (
-            use_explicit_update_steps
-            and update_freq > 1
-            and agent_step_count + no_video_steps_count <= freeze_steps
-        )
+        if use_explicit_update_steps and update_freq > 1:
+            agent_step_count = int(np.asarray(glue_states.agent_state.steps).reshape(-1)[0])
+            freeze_steps = first_hypers.get("freeze_steps", np.inf)
+            if freeze_steps is None:
+                freeze_steps = np.inf
+            freeze_steps = float(freeze_steps)
+            can_use_explicit_steps = (
+                agent_step_count + no_video_steps_count <= freeze_steps
+            )
+        else:
+            can_use_explicit_steps = False
 
         if can_use_explicit_steps:
             data_chunks = []
