@@ -22,9 +22,7 @@ class Hypers(BaseHypers):
 
 @cxu.dataclass
 class Metrics(BaseMetrics):
-    dormancy_pre_core: jax.Array
-    dormancy_core: jax.Array
-    dormancy_post_core: jax.Array
+    dormant_neurons: jax.Array
 
 
 @cxu.dataclass
@@ -139,9 +137,7 @@ class DQN_ReDo(DQN):
 
         metrics = Metrics(
             **self.state.metrics.__dict__,
-            dormancy_pre_core=jnp.float32(0.0),
-            dormancy_core=jnp.float32(0.0),
-            dormancy_post_core=jnp.float32(0.0),
+            dormant_neurons=jnp.float32(0.0),
         )
 
         self.state = AgentState(
@@ -190,17 +186,18 @@ class DQN_ReDo(DQN):
 
         phi = state.params["phi"]
 
-        dormancy_fractions: Dict[str, jax.Array] = {}
+        total_dormant = jnp.float32(0.0)
+        total_neurons = jnp.float32(0.0)
 
         for plan in self._stage_plan:
-            stage = plan["stage"]  # type: ignore[index]
             act_key = plan["act_key"]  # type: ignore[index]
             linear_name = plan["linear_name"]  # type: ignore[index]
             ln_name = plan["ln_name"]  # type: ignore[index]
             linear_path = f"phi/~/{linear_name}"
 
             dormant = self._dormant(feat.activations[act_key], threshold)
-            dormancy_fractions[stage] = jnp.mean(dormant.astype(jnp.float32))
+            total_dormant = total_dormant + dormant.sum().astype(jnp.float32)
+            total_neurons = total_neurons + jnp.float32(dormant.shape[0])
 
             # Incoming weights / bias of this stage's Linear.
             incoming_mask["phi"][linear_path]["w"] = jnp.broadcast_to(
@@ -208,7 +205,6 @@ class DQN_ReDo(DQN):
             )
             incoming_mask["phi"][linear_path]["b"] = dormant
 
-            # Optional LayerNorm reset for the same dormant indices.
             if self._use_ln and self._reset_ln and ln_name is not None:
                 ln_path = f"phi/~/{ln_name}"
                 incoming_mask["phi"][ln_path]["scale"] = dormant
@@ -289,21 +285,10 @@ class DQN_ReDo(DQN):
         )
         new_optim = (new_adam_state, *state.optim[1:])  # type: ignore
 
-        new_metrics = replace(
-            state.metrics,
-            dormancy_pre_core=dormancy_fractions.get(
-                "pre_core", state.metrics.dormancy_pre_core
-            ),
-            dormancy_core=dormancy_fractions.get(
-                "core", state.metrics.dormancy_core
-            ),
-            dormancy_post_core=dormancy_fractions.get(
-                "post_core", state.metrics.dormancy_post_core
-            ),
-        )
+        dormant_neurons = total_dormant / total_neurons
+        new_metrics = replace(state.metrics, dormant_neurons=dormant_neurons)
 
         if not self._redo_apply:
-            # Observe-only: keep params/optim untouched, just publish dormancy.
             return replace(state, key=key, metrics=new_metrics)
 
         return replace(
@@ -312,28 +297,11 @@ class DQN_ReDo(DQN):
 
     def _update_state_with_metrics(self, state: AgentState) -> AgentState:
         prev_updates = state.updates
-        prev_dormancy = (
-            state.metrics.dormancy_pre_core,
-            state.metrics.dormancy_core,
-            state.metrics.dormancy_post_core,
-        )
         state = super()._update_state_with_metrics(state)
-        # Parent rebuilds metrics as the base Metrics (no dormancy fields);
-        # re-promote and carry the dormancy values forward.
-        state = replace(
-            state,
-            metrics=Metrics(
-                **state.metrics.__dict__,
-                dormancy_pre_core=prev_dormancy[0],
-                dormancy_core=prev_dormancy[1],
-                dormancy_post_core=prev_dormancy[2],
-            ),
-        )
         do_redo = (
             (state.updates != prev_updates)
             & (state.updates > 0)
             & (state.updates % state.hypers.redo_freq == 0)
             & self.buffer.can_sample(state.buffer_state)
         )
-        state = jax.lax.cond(do_redo, self._redo_step, lambda s: s, state)
-        return state
+        return jax.lax.cond(do_redo, self._redo_step, lambda s: s, state)
