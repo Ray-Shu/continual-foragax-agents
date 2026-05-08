@@ -79,9 +79,9 @@ class DQN_ReDo(DQN):
 
         self._reset_ln = bool(params.get("redo_reset_layernorm", True))
         self._use_ln = bool(self.rep_params.get("use_layernorm", False))
-        self._preact_ln = bool(self.rep_params.get("preactivation_layer_norm", True))
-        # Observe-only mode: compute dormancy fractions but skip the param/optim
-        # recycle. Lets us instrument vanilla DQN with the same logging path.
+        # Observe-only mode (redo_apply=false): compute dormant_neurons but skip
+        # the param/optim recycle. Lets us instrument vanilla DQN with the same
+        # logging path so the comparison baseline shares this agent's encoder.
         self._redo_apply = bool(params.get("redo_apply", True))
 
         self._stage_plan: List[Dict[str, object]] = []
@@ -218,6 +218,10 @@ class DQN_ReDo(DQN):
             # The dormant mask only applies to the first ``len(dormant)`` rows
             # (the pre_core contribution); rows from the scalars contribution
             # must remain untouched. We pad the mask with False rows.
+            # The Q-head is treated as a sink: zero only its incoming columns
+            # for dormant upstream neurons. Per Sokar et al., we don't probe
+            # Q-output dormancy (no ReLU there) or re-init the head's own
+            # weights — only sever the dead inputs.
             if plan["next_is_q"]:  # type: ignore[index]
                 target_w = state.params["q"]["q"]["w"]
                 col_mask = jnp.broadcast_to(
@@ -296,6 +300,10 @@ class DQN_ReDo(DQN):
         )
 
     def _update_state_with_metrics(self, state: AgentState) -> AgentState:
+        # `redo_freq` is counted in *agent updates*, not env steps. The
+        # `state.updates != prev_updates` guard skips env steps where no
+        # update fired, otherwise redo would re-trigger every env step once
+        # `state.updates` divides `redo_freq`.
         prev_updates = state.updates
         state = super()._update_state_with_metrics(state)
         do_redo = (

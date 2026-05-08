@@ -240,19 +240,18 @@ start_step = None
 save_every = first_hypers.get("experiment", {}).get("save_every", 10_001_000)
 video_every = first_hypers.get("experiment", {}).get("video_every", save_every)
 agent_metrics_obj = getattr(glues[0].agent.state, "metrics", None)
-METRIC_NAMES: tuple = (
+METRIC_NAMES: tuple[str, ...] = (
     tuple(f.name for f in fields(agent_metrics_obj))
     if agent_metrics_obj is not None
     else ()
 )
 
-def get_agent_metrics(agent_state, batch_shape):
-    out = {k: jnp.zeros(batch_shape) for k in METRIC_NAMES}
+
+def get_agent_metrics(agent_state):
     metrics = getattr(agent_state, "metrics", None)
-    if metrics is not None:
-        for k in METRIC_NAMES:
-            out[k] = getattr(metrics, k)
-    return out
+    if metrics is None:
+        return {}
+    return {k: getattr(metrics, k) for k in METRIC_NAMES}
 
 
 def reset_datas():
@@ -289,7 +288,7 @@ if isinstance(glues[0].environment, Foragax):
             "biome_regret": interaction.extra["biome_regret"],
             "biome_rank": interaction.extra["biome_rank"],
             "object_collected_id": interaction.extra["object_collected_id"],
-            **get_agent_metrics(carry.agent_state, interaction.reward.shape),
+            **get_agent_metrics(carry.agent_state),
         }
 
         if isinstance(interaction.obs, Mapping) and "hint" in interaction.obs:
@@ -311,7 +310,7 @@ else:
     def get_data(carry, interaction):
         return {
             "rewards": interaction.reward,
-            **get_agent_metrics(carry.agent_state, interaction.reward.shape),
+            **get_agent_metrics(carry.agent_state),
         }
 
 
