@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=rrg-whitem
+#SBATCH --account=aip-whitem
 #SBATCH --job-name=XN34-TwoBiomeLarge_foragax_ForagaxTwoBiomeLarge-v1_process_data
 #SBATCH --mem=100G
 #SBATCH --nodes=1
