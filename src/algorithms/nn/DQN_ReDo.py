@@ -218,7 +218,7 @@ class DQN_ReDo(DQN):
             # The dormant mask only applies to the first ``len(dormant)`` rows
             # (the pre_core contribution); rows from the scalars contribution
             # must remain untouched. We pad the mask with False rows.
-            # The Q-head is treated as a sink: zero only its incoming columns
+            # The Q-head is treated as a sink: zero only its incoming weights
             # for dormant upstream neurons. Per Sokar et al., we don't probe
             # Q-output dormancy (no ReLU there) or re-init the head's own
             # weights — only sever the dead inputs.
