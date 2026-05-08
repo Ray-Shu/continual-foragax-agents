@@ -87,6 +87,7 @@ def main():
     table_choices, table_default, table_selected = generate_hyper_sweep_table(
         env_reports, path
     )
+    (path / "hypers").mkdir(parents=True, exist_ok=True)
     (path / "hypers" / "choices.tex").write_text(table_choices)
     (path / "hypers" / "default.tex").write_text(table_default)
     (path / "hypers" / "selected.tex").write_text(table_selected)
