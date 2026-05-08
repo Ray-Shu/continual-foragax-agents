@@ -23,6 +23,9 @@ test.json
 # ignore editor settings
 .vscode
 
+# ignore Claude Code session metadata
+.claude/
+
 # ignore build folder
 build
 build/
