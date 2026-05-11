@@ -448,8 +448,6 @@ def video_step(carry, _):
     return carry, (data, frame)
 
 
-# Populated when use_explicit_update_steps is True; use sites are guarded
-# by can_use_explicit_steps, which implies that flag.
 no_update_step: Optional[Callable[..., Any]] = None
 update_block: Optional[Callable[..., Any]] = None
 macro_block: Optional[Callable[..., Any]] = None
@@ -537,8 +535,6 @@ while current_step < n:
         )
 
         if can_use_explicit_steps:
-            # `use_explicit_update_steps` (a precondition of
-            # `can_use_explicit_steps`) implies these are non-None.
             assert no_update_step is not None and update_block is not None
             data_chunks = []
             steps_remaining = no_video_steps_count
@@ -564,21 +560,20 @@ while current_step < n:
                         f"resume from checkpoints at multiples of periodic_freq"
                     )
                     n_macro = block_count // blocks_per_macro
+                    macro_steps_per_iter = blocks_per_macro * update_freq
+                    macro_steps = n_macro * macro_steps_per_iter
                     glue_states, macro_data = jax.lax.scan(
-                        scan_progress(
-                            n_macro, unit_scale=blocks_per_macro * update_freq
-                        )(macro_block),
+                        scan_progress(n_macro, unit_scale=macro_steps_per_iter)(
+                            macro_block
+                        ),
                         glue_states,
                         jnp.arange(n_macro),
                     )
                     macro_data = tree_map(
-                        lambda x: x.reshape(
-                            (n_macro * blocks_per_macro * update_freq, *x.shape[3:])
-                        ),
+                        lambda x: x.reshape((macro_steps, *x.shape[3:])),
                         macro_data,
                     )
                     data_chunks.append(macro_data)
-                    macro_steps = n_macro * blocks_per_macro * update_freq
                     steps_remaining -= macro_steps
 
                     trailing_blocks = block_count - n_macro * blocks_per_macro
