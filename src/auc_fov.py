@@ -66,35 +66,30 @@ def plot_auc_fov(args, metric: str = METRIC, last_percent: float = LAST_PERCENT)
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    # Group by aperture and algorithm
-    apertures_data = {}  # {aperture: {alg: (mean, ci)}}
-    baselines = {}  # {alg: (mean, ci)}
+    is_dqn = pl.col("alg").str.starts_with("DQN")
+    dqn_df = df.filter(is_dqn & pl.col("aperture").is_not_null())
+    baseline_df = df.filter(~is_dqn)
 
-    for aperture in sorted(df["aperture"].unique()):
-        aperture_df = df.filter(pl.col("aperture") == aperture)
-        apertures_data[aperture] = {}
-
-        for alg in aperture_df["alg"].unique():
-            alg_df = aperture_df.filter(pl.col("alg") == alg)
-            mean_val, ci = compute_last_percent_auc(alg_df, metric, last_percent)
-            apertures_data[aperture][alg] = (mean_val, ci)
-
-            if aperture == apertures_data[list(apertures_data.keys())[0]] and not alg.startswith("DQN"):
-                # Store baseline values (use first aperture's baselines for all)
-                baselines[alg] = (mean_val, ci)
-
-    # Extract DQN curve and baseline values
-    sorted_apertures = sorted([a for a in apertures_data.keys() if isinstance(a, (int, float))])
+    sorted_apertures = sorted(
+        a for a in dqn_df["aperture"].unique().to_list() if a is not None
+    )
     dqn_values = []
     dqn_ci_low = []
     dqn_ci_high = []
 
     for aperture in sorted_apertures:
-        if "DQN" in apertures_data[aperture]:
-            mean_val, (ci_low, ci_high) = apertures_data[aperture]["DQN"]
-            dqn_values.append(mean_val)
-            dqn_ci_low.append(ci_low)
-            dqn_ci_high.append(ci_high)
+        alg_df = dqn_df.filter(pl.col("aperture") == aperture)
+        mean_val, (ci_low, ci_high) = compute_last_percent_auc(
+            alg_df, metric, last_percent
+        )
+        dqn_values.append(mean_val)
+        dqn_ci_low.append(ci_low)
+        dqn_ci_high.append(ci_high)
+
+    baselines = {}
+    for alg in baseline_df["alg"].unique().to_list():
+        alg_df = baseline_df.filter(pl.col("alg") == alg)
+        baselines[alg] = compute_last_percent_auc(alg_df, metric, last_percent)
 
     # Plot DQN
     if dqn_values:
