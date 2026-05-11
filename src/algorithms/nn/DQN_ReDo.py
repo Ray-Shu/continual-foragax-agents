@@ -170,8 +170,7 @@ class DQN_ReDo(DQN):
             f"is optax.ScaleByAdamState; got {type(adam_state).__name__}."
         )
 
-        # ReDo's hyper `redo_freq` counts agent updates. The training-loop
-        # macro-block scan dispatches on env steps, so convert here.
+        # redo_freq is in agent updates; periodic_freq is in env steps.
         self.periodic_freq = int(params["redo_freq"]) * int(
             self.state.hypers.update_freq
         )

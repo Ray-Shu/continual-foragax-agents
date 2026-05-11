@@ -77,9 +77,7 @@ class AgentState(BaseAgentState):
 
 @checkpointable(("buffer", "steps", "state", "updates"))
 class NNAgent(BaseAgent):
-    # Number of env steps between firings of `_periodic_step`. None means the
-    # agent has no periodic operation (the training loop falls back to its
-    # single-level block scan). Set by subclasses in __init__.
+    # Env steps between `_periodic_step` firings; None = no periodic op.
     periodic_freq: Optional[int] = None
 
     def __init__(
@@ -388,13 +386,9 @@ class NNAgent(BaseAgent):
         )
 
     def _periodic_step(self, state: AgentState) -> AgentState:
-        # Hook for expensive periodic operations (ReDo, resets, PT-DQN's
-        # permanent-net update, shrink-and-perturb, …). Called by the training
-        # loop once every `periodic_freq` env steps. Subclasses override this
-        # *instead of* gating the op with a per-step `jax.lax.cond` — when the
-        # outer scan is vmapped over seeds, vmap rewrites cond to select, which
-        # forces both branches to execute every step. Hoisting the dispatch to
-        # the training loop's outer scan keeps the hot path free of conds.
+        # Override here rather than gating with a per-step `jax.lax.cond`:
+        # under vmap, cond is rewritten to select and both branches execute
+        # every step. The training loop dispatches this from an outer scan.
         return state
 
     def _advance_update_clock(self, state: AgentState) -> AgentState:

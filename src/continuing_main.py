@@ -11,8 +11,9 @@ import pickle
 import socket
 import time
 import traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import fields, replace
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -425,6 +426,87 @@ def scan_progress(num_iters: int, unit_scale: int = 1):
     return wrap
 
 
+# Defined outside the outer milestone loop so trace overhead isn't paid
+# on every save/video iteration.
+update_freq = int(first_hypers.get("update_freq", 1))
+freeze_steps = first_hypers.get("freeze_steps", np.inf)
+if freeze_steps is None:
+    freeze_steps = np.inf
+freeze_steps = float(freeze_steps)
+
+
+def step(carry, _):
+    carry, interaction = v_step(carry)
+    data = get_data(carry, interaction)
+    return carry, data
+
+
+def video_step(carry, _):
+    frame = v_render(carry)
+    carry, interaction = v_step(carry)
+    data = get_data(carry, interaction)
+    return carry, (data, frame)
+
+
+no_update_step: Optional[Callable[..., Any]] = None
+update_block: Optional[Callable[..., Any]] = None
+macro_block: Optional[Callable[..., Any]] = None
+periodic_freq: Optional[int] = None
+blocks_per_macro: Optional[int] = None
+
+if use_explicit_update_steps:
+
+    def _no_update_step(carry, _):
+        carry, interaction = v_step_no_update(carry)
+        data = get_data(carry, interaction)
+        return carry, data
+
+    no_update_step = _no_update_step
+
+    def _update_block(carry, _):
+        carry, interaction = v_step_update(carry)
+        update_data = get_data(carry, interaction)
+        carry, skip_data = jax.lax.scan(
+            _no_update_step,
+            carry,
+            jnp.arange(update_freq - 1),
+            unroll=UNROLL,
+        )
+        block_data = tree_map(
+            lambda first, rest: jnp.concatenate(
+                [jnp.expand_dims(first, 0), rest], axis=0
+            ),
+            update_data,
+            skip_data,
+        )
+        return carry, block_data
+
+    update_block = _update_block
+
+    periodic_freq = getattr(glues[0].agent, "periodic_freq", None)
+    if periodic_freq is not None:
+        assert periodic_freq % update_freq == 0, (
+            f"agent.periodic_freq ({periodic_freq}) must be divisible "
+            f"by update_freq ({update_freq})"
+        )
+        blocks_per_macro = periodic_freq // update_freq
+        _v_periodic = jax.vmap(glues[0].agent._periodic_step)
+        _blocks_per_macro = blocks_per_macro
+
+        def _macro_block(carry, _):
+            carry, blocks_data = jax.lax.scan(
+                _update_block,
+                carry,
+                jnp.arange(_blocks_per_macro),
+                unroll=UNROLL,
+            )
+            new_agent_state = _v_periodic(carry.agent_state)
+            carry = replace(carry, agent_state=new_agent_state)
+            return carry, blocks_data
+
+        macro_block = _macro_block
+
+
 while current_step < n:
     next_save = ((current_step // save_every) + 1) * save_every
     next_video = ((current_step // video_every) + 1) * video_every
@@ -443,31 +525,9 @@ while current_step < n:
         no_video_steps_count = steps_in_iter
         video_steps_count = 0
 
-    def video_step(carry, _):
-        frame = v_render(carry)
-        carry, interaction = v_step(carry)
-        data = get_data(carry, interaction)
-        return carry, (data, frame)
-
     data_chunk = None
     if no_video_steps_count > 0:
-        update_freq = int(first_hypers.get("update_freq", 1))
-
-        def step(carry, _):
-            carry, interaction = v_step(carry)
-            data = get_data(carry, interaction)
-            return carry, data
-
-        def no_update_step(carry, _):
-            carry, interaction = v_step_no_update(carry)
-            data = get_data(carry, interaction)
-            return carry, data
-
         agent_step_count = int(np.asarray(glue_states.agent_state.steps).reshape(-1)[0])
-        freeze_steps = first_hypers.get("freeze_steps", np.inf)
-        if freeze_steps is None:
-            freeze_steps = np.inf
-        freeze_steps = float(freeze_steps)
         can_use_explicit_steps = (
             use_explicit_update_steps
             and update_freq > 1
@@ -475,6 +535,7 @@ while current_step < n:
         )
 
         if can_use_explicit_steps:
+            assert no_update_step is not None and update_block is not None
             data_chunks = []
             steps_remaining = no_video_steps_count
 
@@ -490,70 +551,29 @@ while current_step < n:
 
             block_count = steps_remaining // update_freq
             if block_count > 0:
-
-                def update_block(carry, _):
-                    carry, interaction = v_step_update(carry)
-                    update_data = get_data(carry, interaction)
-                    carry, skip_data = jax.lax.scan(
-                        no_update_step,
-                        carry,
-                        jnp.arange(update_freq - 1),
-                        unroll=UNROLL,
-                    )
-                    block_data = tree_map(
-                        lambda first, rest: jnp.concatenate(
-                            [jnp.expand_dims(first, 0), rest], axis=0
-                        ),
-                        update_data,
-                        skip_data,
-                    )
-                    return carry, block_data
-
-                # Periodic-op macro-block path: when the agent declares a
-                # `periodic_freq` (e.g. DQN_ReDo, PT_DQN, DQN_Reset, …), we wrap
-                # the update_block scan in an outer scan whose body fires
-                # `_periodic_step` at the boundary. This keeps the hot path free
-                # of `jax.lax.cond`, which under vmap rewrites to `select` and
-                # forces both branches to execute every step.
-                periodic_freq = getattr(glues[0].agent, "periodic_freq", None)
-                blocks_per_macro = None
-                if periodic_freq is not None:
-                    assert periodic_freq % update_freq == 0, (
-                        f"agent.periodic_freq ({periodic_freq}) must be divisible "
-                        f"by update_freq ({update_freq})"
-                    )
-                    blocks_per_macro = periodic_freq // update_freq
-
                 if blocks_per_macro is not None and block_count >= blocks_per_macro:
-                    v_periodic = jax.vmap(glues[0].agent._periodic_step)
-
-                    def macro_block(carry, _):
-                        carry, blocks_data = jax.lax.scan(
-                            update_block,
-                            carry,
-                            jnp.arange(blocks_per_macro),
-                            unroll=UNROLL,
-                        )
-                        new_agent_state = v_periodic(carry.agent_state)
-                        carry = replace(carry, agent_state=new_agent_state)
-                        return carry, blocks_data
-
+                    assert periodic_freq is not None and macro_block is not None
+                    assert current_step % periodic_freq == 0, (
+                        f"current_step ({current_step}) is not aligned to "
+                        f"periodic_freq ({periodic_freq}); set save_every and "
+                        f"video_every to multiples of periodic_freq, and only "
+                        f"resume from checkpoints at multiples of periodic_freq"
+                    )
                     n_macro = block_count // blocks_per_macro
+                    macro_steps_per_iter = blocks_per_macro * update_freq
+                    macro_steps = n_macro * macro_steps_per_iter
                     glue_states, macro_data = jax.lax.scan(
-                        scan_progress(
-                            n_macro, unit_scale=blocks_per_macro * update_freq
-                        )(macro_block),
+                        scan_progress(n_macro, unit_scale=macro_steps_per_iter)(
+                            macro_block
+                        ),
                         glue_states,
                         jnp.arange(n_macro),
                     )
                     macro_data = tree_map(
-                        lambda x: x.reshape(
-                            (n_macro * blocks_per_macro * update_freq, *x.shape[3:])
-                        ),
+                        lambda x: x.reshape((macro_steps, *x.shape[3:])),
                         macro_data,
                     )
                     data_chunks.append(macro_data)
-                    macro_steps = n_macro * blocks_per_macro * update_freq
                     steps_remaining -= macro_steps
 
                     trailing_blocks = block_count - n_macro * blocks_per_macro
