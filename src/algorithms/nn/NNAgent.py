@@ -1,6 +1,6 @@
 from abc import abstractmethod
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import fields, replace
 from functools import partial
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -63,7 +63,7 @@ class Hypers(BaseHypers):
 @cxu.dataclass
 class AgentState(BaseAgentState):
     params: Any
-    optim: Dict[str, optax.OptState]
+    optim: optax.OptState
     buffer_state: Any
     key: jax.Array
     last_timestep: Dict[str, jax.Array]
@@ -365,17 +365,10 @@ class NNAgent(BaseAgent):
     def _update(self, state: AgentState) -> Tuple[AgentState, Dict[str, jax.Array]]: ...
 
     def _update_state_with_metrics(self, state: AgentState) -> AgentState:
-        new_state, metrics = self._update(state)
-        # Update the latest metrics in the state
-        metrics = Metrics(
-            weight_change=metrics.get("weight_change", state.metrics.weight_change),
-            abs_td_error=metrics.get("abs_td_error", state.metrics.abs_td_error),
-            squared_td_error=metrics.get(
-                "squared_td_error", state.metrics.squared_td_error
-            ),
-            loss=metrics.get("loss", state.metrics.loss),
-        )
-        return replace(new_state, metrics=metrics)
+        new_state, updates = self._update(state)
+        field_names = {f.name for f in fields(state.metrics)}
+        applicable = {k: v for k, v in updates.items() if k in field_names}
+        return replace(new_state, metrics=replace(state.metrics, **applicable))
 
     def _update_state_with_metrics_if_can_sample(self, state: AgentState) -> AgentState:
         return jax.lax.cond(

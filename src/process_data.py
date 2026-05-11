@@ -13,6 +13,19 @@ from experiment.ExperimentModel import ExperimentModel
 from utils.results import Result, ResultCollection
 
 
+def _slurm_max_workers() -> int:
+    cpt = int(os.environ.get("SLURM_CPUS_PER_TASK", "0") or 0)
+    nt = int(os.environ.get("SLURM_NTASKS", "0") or 0)
+    if cpt and nt:
+        return cpt * nt
+    if nt:
+        return nt
+    on_node = int(os.environ.get("SLURM_CPUS_ON_NODE", "0") or 0)
+    if on_node:
+        return on_node
+    return os.cpu_count() or 1
+
+
 def process_alg_result(alg_result: Result, group, aperture):
     alg = alg_result.filename
     print(f"Loading: {group} {alg}")
@@ -70,7 +83,9 @@ def main(experiment_path: Path):
     for group, sub_results in results.groupby_directory(level=4):
         aperture = int(group) if group.isdigit() else None
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(_slurm_max_workers(), len(sub_results))
+        ) as executor:
             futures = [
                 executor.submit(process_alg_result, alg_result, group, aperture)
                 for alg_result in sub_results

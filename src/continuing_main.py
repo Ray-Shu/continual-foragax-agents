@@ -12,7 +12,7 @@ import socket
 import time
 import traceback
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import jax
 import jax.numpy as jnp
@@ -239,52 +239,48 @@ if not any(idx in video_idxs for idx in indices) and num_indices > 1:
 start_step = None
 save_every = first_hypers.get("experiment", {}).get("save_every", 10_001_000)
 video_every = first_hypers.get("experiment", {}).get("video_every", save_every)
-datas = {}
-datas["rewards"] = np.empty((len(indices), n), dtype=np.float16)
-datas["weight_change"] = np.empty((len(indices), n), dtype=np.float16)
-datas["squared_td_error"] = np.empty((len(indices), n), dtype=np.float16)
-datas["abs_td_error"] = np.empty((len(indices), n), dtype=np.float16)
-datas["loss"] = np.empty((len(indices), n), dtype=np.float16)
+agent_metrics_obj = getattr(glues[0].agent.state, "metrics", None)
+METRIC_NAMES: tuple[str, ...] = (
+    tuple(f.name for f in fields(agent_metrics_obj))
+    if agent_metrics_obj is not None
+    else ()
+)
 
 
-def get_agent_metrics(agent_state, batch_shape):
-    """Safely extract metrics from agent state, handling different agent types."""
-    weight_change = jnp.zeros(batch_shape)
-    squared_td_error = jnp.zeros(batch_shape)
-    abs_td_error = jnp.zeros(batch_shape)
-    loss = jnp.zeros(batch_shape)
+def get_agent_metrics(agent_state):
+    metrics = getattr(agent_state, "metrics", None)
+    if metrics is None:
+        return {}
+    return {k: getattr(metrics, k) for k in METRIC_NAMES}
 
-    if hasattr(agent_state, "metrics"):
-        metrics = agent_state.metrics
-        if hasattr(metrics, "weight_change"):
-            weight_change = metrics.weight_change
-        if hasattr(metrics, "squared_td_error"):
-            squared_td_error = metrics.squared_td_error
-        if hasattr(metrics, "abs_td_error"):
-            abs_td_error = metrics.abs_td_error
-        if hasattr(metrics, "loss"):
-            loss = metrics.loss
 
-    return weight_change, squared_td_error, abs_td_error, loss
+def reset_datas():
+    fresh_datas = {"rewards": np.empty((len(indices), n), dtype=np.float16)}
+    for k in METRIC_NAMES:
+        fresh_datas[k] = np.empty((len(indices), n), dtype=np.float16)
+    if isinstance(glues[0].environment, Foragax):
+        fresh_datas["pos"] = np.empty((len(indices), n, 2), dtype=np.int32)
+        fresh_datas["biome_id"] = np.empty((len(indices), n), dtype=np.int32)
+        fresh_datas["biome_regret"] = np.empty((len(indices), n), dtype=np.float16)
+        fresh_datas["biome_rank"] = np.empty((len(indices), n), dtype=np.int32)
+        fresh_datas["object_collected_id"] = np.empty(
+            (len(indices), n), dtype=np.int32
+        )
+        fresh_datas["hint"] = np.full((len(indices), n), -1, dtype=np.int32)
+        if "Weather" in glues[0].environment.env.name:
+            fresh_datas["temperatures"] = np.empty(
+                (len(indices), n, len(glues[0].environment.env.objects)),
+                dtype=np.float16,
+            )
+    return fresh_datas
+
+
+datas = reset_datas()
 
 
 if isinstance(glues[0].environment, Foragax):
-    datas["pos"] = np.empty((len(indices), n, 2), dtype=np.int32)
-    datas["biome_id"] = np.empty((len(indices), n), dtype=np.int32)
-    datas["biome_regret"] = np.empty((len(indices), n), dtype=np.float16)
-    datas["biome_rank"] = np.empty((len(indices), n), dtype=np.int32)
-    datas["object_collected_id"] = np.empty((len(indices), n), dtype=np.int32)
-    datas["hint"] = np.full((len(indices), n), -1, dtype=np.int32)
-
-    if "Weather" in glues[0].environment.env.name:
-        datas["temperatures"] = np.empty(
-            (len(indices), n, len(glues[0].environment.env.objects)), dtype=np.float16
-        )
 
     def get_data(carry, interaction):
-        weight_change, squared_td_error, abs_td_error, loss = get_agent_metrics(
-            carry.agent_state, interaction.reward.shape
-        )
         data = {
             "rewards": interaction.reward,
             "pos": carry.env_state.state.pos,
@@ -292,10 +288,7 @@ if isinstance(glues[0].environment, Foragax):
             "biome_regret": interaction.extra["biome_regret"],
             "biome_rank": interaction.extra["biome_rank"],
             "object_collected_id": interaction.extra["object_collected_id"],
-            "weight_change": weight_change,
-            "squared_td_error": squared_td_error,
-            "abs_td_error": abs_td_error,
-            "loss": loss,
+            **get_agent_metrics(carry.agent_state),
         }
 
         if isinstance(interaction.obs, Mapping) and "hint" in interaction.obs:
@@ -315,46 +308,15 @@ if isinstance(glues[0].environment, Foragax):
 else:
 
     def get_data(carry, interaction):
-        weight_change, squared_td_error, abs_td_error, loss = get_agent_metrics(
-            carry.agent_state, interaction.reward.shape
-        )
-        data = {
+        return {
             "rewards": interaction.reward,
-            "weight_change": weight_change,
-            "squared_td_error": squared_td_error,
-            "abs_td_error": abs_td_error,
-            "loss": loss,
+            **get_agent_metrics(carry.agent_state),
         }
-        return data
 
 
 initial_glue_states = [g.state for g in glues]
 loaded_checkpoints = [False] * len(indices)
 checkpoint_load_failed = False
-
-
-def reset_datas():
-    fresh_datas = {}
-    fresh_datas["rewards"] = np.empty((len(indices), n), dtype=np.float16)
-    fresh_datas["weight_change"] = np.empty((len(indices), n), dtype=np.float16)
-    fresh_datas["squared_td_error"] = np.empty((len(indices), n), dtype=np.float16)
-    fresh_datas["abs_td_error"] = np.empty((len(indices), n), dtype=np.float16)
-    fresh_datas["loss"] = np.empty((len(indices), n), dtype=np.float16)
-    if isinstance(glues[0].environment, Foragax):
-        fresh_datas["pos"] = np.empty((len(indices), n, 2), dtype=np.int32)
-        fresh_datas["biome_id"] = np.empty((len(indices), n), dtype=np.int32)
-        fresh_datas["biome_regret"] = np.empty((len(indices), n), dtype=np.float16)
-        fresh_datas["biome_rank"] = np.empty((len(indices), n), dtype=np.int32)
-        fresh_datas["object_collected_id"] = np.empty(
-            (len(indices), n), dtype=np.int32
-        )
-        fresh_datas["hint"] = np.full((len(indices), n), -1, dtype=np.int32)
-        if "Weather" in glues[0].environment.env.name:
-            fresh_datas["temperatures"] = np.empty(
-                (len(indices), n, len(glues[0].environment.env.objects)),
-                dtype=np.float16,
-            )
-    return fresh_datas
 
 
 for i, idx in enumerate(indices):
