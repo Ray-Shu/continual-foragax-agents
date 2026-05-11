@@ -3,6 +3,7 @@
     "time": "1:30:00",
     "gpus": 1,
     "cores": 1,
+    "threads_per_task": 1,
     "mem_per_core": "16G",
     "sequential": 1,
     "tasks_per_core": 15,

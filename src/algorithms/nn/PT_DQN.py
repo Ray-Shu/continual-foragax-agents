@@ -58,7 +58,9 @@ def mse_q_loss(q, a, r, gamma, qp):
 
 @cxu.dataclass
 class Hypers(DQNHypers):
-    pt_update_freq: int  # k: how often (gradient updates) to update permanent and decay transient
+    pt_update_freq: (
+        int  # k: how often (gradient updates) to update permanent and decay transient
+    )
     pt_decay: float  # λ: decay factor for transient weights
     pt_optimizer: OptimizerHypers  # optimizer config for permanent network
     pm_buffer_size: int  # size of PM replay buffer (reference: 10000)
@@ -71,10 +73,11 @@ class PMBufferState:
     Reference uses itertools.islice for sequential (no-replacement) reads:
       curr_batch = list(islice(memory, i*batch, (i+1)*batch))
     """
-    x: jax.Array          # (max_size, *obs_shape)
-    scalars: jax.Array    # (max_size, *scalar_shape)
-    a: jax.Array          # (max_size,)
-    q_p_a: jax.Array      # (max_size,)
+
+    x: jax.Array  # (max_size, *obs_shape)
+    scalars: jax.Array  # (max_size, *scalar_shape)
+    a: jax.Array  # (max_size,)
+    q_p_a: jax.Array  # (max_size,)
     write_index: jnp.int32
     size: jnp.int32
 
@@ -136,9 +139,7 @@ class PT_DQN(DQN):
         pm_buffer_size = params.get("pm_buffer_size", 10000)
         self.pm_buffer_size = pm_buffer_size
         pm_buffer_state = PMBufferState(
-            x=jnp.zeros(
-                (pm_buffer_size, *self.state.last_timestep["x"].shape)
-            ),
+            x=jnp.zeros((pm_buffer_size, *self.state.last_timestep["x"].shape)),
             scalars=jnp.zeros(
                 (pm_buffer_size, *self.state.last_timestep["scalars"].shape)
             ),
@@ -165,6 +166,12 @@ class PT_DQN(DQN):
             pt_optim=pt_optim,
             pm_buffer_state=pm_buffer_state,
             hypers=hypers,
+        )
+
+        # `pt_update_freq` counts agent updates; convert to env steps for the
+        # training-loop macro-block scan.
+        self.periodic_freq = int(params["pt_update_freq"]) * int(
+            self.state.hypers.update_freq
         )
 
     # ------------------------
@@ -272,37 +279,32 @@ class PT_DQN(DQN):
 
         state = replace(state, updates=updates)
 
-        # --- PT gradient update + decay every k gradient updates ---
-        # Using gradient update count (state.updates, already incremented above)
-        # rather than env steps, which would never trigger due to update_freq
-        # interaction (steps is always ≡ 0 mod update_freq when _update is called,
-        # so env_step ≡ 1 mod update_freq, which never divides pt_update_freq evenly).
-        is_pt_step = state.updates % state.hypers.pt_update_freq == 0
-        state = jax.lax.cond(
-            is_pt_step,
-            lambda s: self._pt_gradient_update(s),
-            lambda s: s,
-            state,
-        )
+        # PT gradient update + transient-weight decay used to be guarded by
+        # per-update conds here. They're now hoisted into `_periodic_step`,
+        # dispatched by the training-loop macro-block scan every
+        # `pt_update_freq * update_freq` env steps.
 
-        # --- Decay transient weights every k gradient updates (always) ---
-        state = jax.lax.cond(
-            is_pt_step,
-            lambda s: replace(
-                s,
-                params=jax.tree_util.tree_map(
-                    lambda p: s.hypers.pt_decay * p, s.params
-                ),
-            ),
-            lambda s: s,
-            state,
-        )
-
-        # --- Target network update AFTER PT update + decay (matching reference) ---
+        # --- Target network update (matching reference: after PT step when
+        # one fires; but since we no longer fire PT inside _update, just apply
+        # target refresh here unconditionally on its own schedule).
         target_params = self._update_target_network(state, updates)
         state = replace(state, target_params=target_params)
 
         return state, metrics
+
+    @partial(jax.jit, static_argnums=0)
+    def _periodic_step(self, state: AgentState) -> AgentState:
+        # PT-DQN's periodic op: U sequential gradient steps on the PM buffer
+        # to update the permanent network, then decay all transient weights
+        # by λ. Order matches the reference implementation.
+        state = self._pt_gradient_update(state)
+        state = replace(
+            state,
+            params=jax.tree_util.tree_map(
+                lambda p: state.hypers.pt_decay * p, state.params
+            ),
+        )
+        return state
 
     @partial(jax.jit, static_argnums=0)
     def _computeUpdate(self, state: AgentState, batch: Dict):

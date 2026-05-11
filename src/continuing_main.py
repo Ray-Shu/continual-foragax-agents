@@ -35,6 +35,7 @@ from utils.rlglue import RlGlue
 
 UNROLL = 1
 
+
 # ------------------
 # -- Command Args --
 # ------------------
@@ -263,9 +264,7 @@ def reset_datas():
         fresh_datas["biome_id"] = np.empty((len(indices), n), dtype=np.int32)
         fresh_datas["biome_regret"] = np.empty((len(indices), n), dtype=np.float16)
         fresh_datas["biome_rank"] = np.empty((len(indices), n), dtype=np.int32)
-        fresh_datas["object_collected_id"] = np.empty(
-            (len(indices), n), dtype=np.int32
-        )
+        fresh_datas["object_collected_id"] = np.empty((len(indices), n), dtype=np.int32)
         fresh_datas["hint"] = np.full((len(indices), n), -1, dtype=np.int32)
         if "Weather" in glues[0].environment.env.name:
             fresh_datas["temperatures"] = np.empty(
@@ -510,17 +509,84 @@ while current_step < n:
                     )
                     return carry, block_data
 
-                glue_states, block_data = jax.lax.scan(
-                    scan_progress(block_count, unit_scale=update_freq)(update_block),
-                    glue_states,
-                    jnp.arange(block_count),
-                )
-                block_data = tree_map(
-                    lambda x: x.reshape((block_count * update_freq, *x.shape[2:])),
-                    block_data,
-                )
-                data_chunks.append(block_data)
-                steps_remaining -= block_count * update_freq
+                # Periodic-op macro-block path: when the agent declares a
+                # `periodic_freq` (e.g. DQN_ReDo, PT_DQN, DQN_Reset, …), we wrap
+                # the update_block scan in an outer scan whose body fires
+                # `_periodic_step` at the boundary. This keeps the hot path free
+                # of `jax.lax.cond`, which under vmap rewrites to `select` and
+                # forces both branches to execute every step.
+                periodic_freq = getattr(glues[0].agent, "periodic_freq", None)
+                blocks_per_macro = None
+                if periodic_freq is not None:
+                    assert periodic_freq % update_freq == 0, (
+                        f"agent.periodic_freq ({periodic_freq}) must be divisible "
+                        f"by update_freq ({update_freq})"
+                    )
+                    blocks_per_macro = periodic_freq // update_freq
+
+                if blocks_per_macro is not None and block_count >= blocks_per_macro:
+                    v_periodic = jax.vmap(glues[0].agent._periodic_step)
+
+                    def macro_block(carry, _):
+                        carry, blocks_data = jax.lax.scan(
+                            update_block,
+                            carry,
+                            jnp.arange(blocks_per_macro),
+                            unroll=UNROLL,
+                        )
+                        new_agent_state = v_periodic(carry.agent_state)
+                        carry = replace(carry, agent_state=new_agent_state)
+                        return carry, blocks_data
+
+                    n_macro = block_count // blocks_per_macro
+                    glue_states, macro_data = jax.lax.scan(
+                        scan_progress(
+                            n_macro, unit_scale=blocks_per_macro * update_freq
+                        )(macro_block),
+                        glue_states,
+                        jnp.arange(n_macro),
+                    )
+                    macro_data = tree_map(
+                        lambda x: x.reshape(
+                            (n_macro * blocks_per_macro * update_freq, *x.shape[3:])
+                        ),
+                        macro_data,
+                    )
+                    data_chunks.append(macro_data)
+                    macro_steps = n_macro * blocks_per_macro * update_freq
+                    steps_remaining -= macro_steps
+
+                    trailing_blocks = block_count - n_macro * blocks_per_macro
+                    if trailing_blocks > 0:
+                        glue_states, trailing_data = jax.lax.scan(
+                            scan_progress(trailing_blocks, unit_scale=update_freq)(
+                                update_block
+                            ),
+                            glue_states,
+                            jnp.arange(trailing_blocks),
+                        )
+                        trailing_data = tree_map(
+                            lambda x: x.reshape(
+                                (trailing_blocks * update_freq, *x.shape[2:])
+                            ),
+                            trailing_data,
+                        )
+                        data_chunks.append(trailing_data)
+                        steps_remaining -= trailing_blocks * update_freq
+                else:
+                    glue_states, block_data = jax.lax.scan(
+                        scan_progress(block_count, unit_scale=update_freq)(
+                            update_block
+                        ),
+                        glue_states,
+                        jnp.arange(block_count),
+                    )
+                    block_data = tree_map(
+                        lambda x: x.reshape((block_count * update_freq, *x.shape[2:])),
+                        block_data,
+                    )
+                    data_chunks.append(block_data)
+                    steps_remaining -= block_count * update_freq
 
             if steps_remaining > 0:
                 glue_states, tail_data = jax.lax.scan(
