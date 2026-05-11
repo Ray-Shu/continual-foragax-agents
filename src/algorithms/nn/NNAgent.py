@@ -388,13 +388,10 @@ class NNAgent(BaseAgent):
         )
 
     def _periodic_step(self, state: AgentState) -> AgentState:
-        # Hook for expensive periodic operations (ReDo, resets, PT-DQN's
-        # permanent-net update, shrink-and-perturb, …). Called by the training
-        # loop once every `periodic_freq` env steps. Subclasses override this
-        # *instead of* gating the op with a per-step `jax.lax.cond` — when the
-        # outer scan is vmapped over seeds, vmap rewrites cond to select, which
-        # forces both branches to execute every step. Hoisting the dispatch to
-        # the training loop's outer scan keeps the hot path free of conds.
+        # Override instead of guarding with a per-step `jax.lax.cond`: under
+        # vmap, cond is rewritten to select and both branches execute every
+        # step. The training loop dispatches this every `periodic_freq` env
+        # steps from an outer scan, keeping the hot path cond-free.
         return state
 
     def _advance_update_clock(self, state: AgentState) -> AgentState:

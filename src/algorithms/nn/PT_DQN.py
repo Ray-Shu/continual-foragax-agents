@@ -58,9 +58,7 @@ def mse_q_loss(q, a, r, gamma, qp):
 
 @cxu.dataclass
 class Hypers(DQNHypers):
-    pt_update_freq: (
-        int  # k: how often (gradient updates) to update permanent and decay transient
-    )
+    pt_update_freq: int  # k: gradient updates between permanent updates
     pt_decay: float  # λ: decay factor for transient weights
     pt_optimizer: OptimizerHypers  # optimizer config for permanent network
     pm_buffer_size: int  # size of PM replay buffer (reference: 10000)
@@ -279,14 +277,6 @@ class PT_DQN(DQN):
 
         state = replace(state, updates=updates)
 
-        # PT gradient update + transient-weight decay used to be guarded by
-        # per-update conds here. They're now hoisted into `_periodic_step`,
-        # dispatched by the training-loop macro-block scan every
-        # `pt_update_freq * update_freq` env steps.
-
-        # --- Target network update (matching reference: after PT step when
-        # one fires; but since we no longer fire PT inside _update, just apply
-        # target refresh here unconditionally on its own schedule).
         target_params = self._update_target_network(state, updates)
         state = replace(state, target_params=target_params)
 
@@ -294,9 +284,6 @@ class PT_DQN(DQN):
 
     @partial(jax.jit, static_argnums=0)
     def _periodic_step(self, state: AgentState) -> AgentState:
-        # PT-DQN's periodic op: U sequential gradient steps on the PM buffer
-        # to update the permanent network, then decay all transient weights
-        # by λ. Order matches the reference implementation.
         state = self._pt_gradient_update(state)
         state = replace(
             state,
