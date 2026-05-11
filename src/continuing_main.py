@@ -11,8 +11,9 @@ import pickle
 import socket
 import time
 import traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import fields, replace
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -447,18 +448,28 @@ def video_step(carry, _):
     return carry, (data, frame)
 
 
+# Populated when use_explicit_update_steps is True; use sites are guarded
+# by can_use_explicit_steps, which implies that flag.
+no_update_step: Optional[Callable[..., Any]] = None
+update_block: Optional[Callable[..., Any]] = None
+macro_block: Optional[Callable[..., Any]] = None
+periodic_freq: Optional[int] = None
+blocks_per_macro: Optional[int] = None
+
 if use_explicit_update_steps:
 
-    def no_update_step(carry, _):
+    def _no_update_step(carry, _):
         carry, interaction = v_step_no_update(carry)
         data = get_data(carry, interaction)
         return carry, data
 
-    def update_block(carry, _):
+    no_update_step = _no_update_step
+
+    def _update_block(carry, _):
         carry, interaction = v_step_update(carry)
         update_data = get_data(carry, interaction)
         carry, skip_data = jax.lax.scan(
-            no_update_step,
+            _no_update_step,
             carry,
             jnp.arange(update_freq - 1),
             unroll=UNROLL,
@@ -472,26 +483,30 @@ if use_explicit_update_steps:
         )
         return carry, block_data
 
+    update_block = _update_block
+
     periodic_freq = getattr(glues[0].agent, "periodic_freq", None)
-    blocks_per_macro = None
     if periodic_freq is not None:
         assert periodic_freq % update_freq == 0, (
             f"agent.periodic_freq ({periodic_freq}) must be divisible "
             f"by update_freq ({update_freq})"
         )
         blocks_per_macro = periodic_freq // update_freq
-        v_periodic = jax.vmap(glues[0].agent._periodic_step)
+        _v_periodic = jax.vmap(glues[0].agent._periodic_step)
+        _blocks_per_macro = blocks_per_macro
 
-        def macro_block(carry, _):
+        def _macro_block(carry, _):
             carry, blocks_data = jax.lax.scan(
-                update_block,
+                _update_block,
                 carry,
-                jnp.arange(blocks_per_macro),
+                jnp.arange(_blocks_per_macro),
                 unroll=UNROLL,
             )
-            new_agent_state = v_periodic(carry.agent_state)
+            new_agent_state = _v_periodic(carry.agent_state)
             carry = replace(carry, agent_state=new_agent_state)
             return carry, blocks_data
+
+        macro_block = _macro_block
 
 
 while current_step < n:
@@ -522,6 +537,9 @@ while current_step < n:
         )
 
         if can_use_explicit_steps:
+            # `use_explicit_update_steps` (a precondition of
+            # `can_use_explicit_steps`) implies these are non-None.
+            assert no_update_step is not None and update_block is not None
             data_chunks = []
             steps_remaining = no_video_steps_count
 
@@ -538,6 +556,7 @@ while current_step < n:
             block_count = steps_remaining // update_freq
             if block_count > 0:
                 if blocks_per_macro is not None and block_count >= blocks_per_macro:
+                    assert periodic_freq is not None and macro_block is not None
                     assert current_step % periodic_freq == 0, (
                         f"current_step ({current_step}) is not aligned to "
                         f"periodic_freq ({periodic_freq}); set save_every and "
