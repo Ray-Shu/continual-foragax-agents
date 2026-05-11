@@ -166,8 +166,7 @@ class PT_DQN(DQN):
             hypers=hypers,
         )
 
-        # `pt_update_freq` counts agent updates; convert to env steps for the
-        # training-loop macro-block scan.
+        # pt_update_freq is in agent updates; periodic_freq is in env steps.
         self.periodic_freq = int(params["pt_update_freq"]) * int(
             self.state.hypers.update_freq
         )
