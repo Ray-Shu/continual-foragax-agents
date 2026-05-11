@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=rrg-whitem
+#SBATCH --account=aip-whitem
 #SBATCH --job-name=XN34-TwoBiomeLarge_foragax-sweep_ForagaxTwoBiomeLarge-v1_hypers
 #SBATCH --mem-per-cpu=8G
 #SBATCH --ntasks=1

@@ -1,0 +1,12 @@
+{
+    "channel_priorities.1": 1,
+    "channel_priorities.2": 1,
+    "environment.aperture_size": -1,
+    "environment.env_id": "ForagaxTwoBiomeLarge-v1",
+    "environment.observation_type": "object",
+    "experiment.seed_offset": 0,
+    "experiment.video_every": 1000000,
+    "experiment.video_length": 20000,
+    "mode": "world",
+    "nowrap": 0
+}
