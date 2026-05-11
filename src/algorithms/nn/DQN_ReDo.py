@@ -79,6 +79,17 @@ class DQN_ReDo(DQN):
 
         self._reset_ln = bool(params.get("redo_reset_layernorm", True))
         self._use_ln = bool(self.rep_params.get("use_layernorm", False))
+        self._preact_ln = bool(self.rep_params.get("preactivation_layer_norm", True))
+        # By default we probe dormancy at the ReLU output. In post-act LN the
+        # actual signal that reaches the next layer is post-LN, so the user can
+        # opt to score there instead via redo_score_after_ln.
+        self._score_after_ln = bool(params.get("redo_score_after_ln", False))
+        if self._score_after_ln and not (self._use_ln and not self._preact_ln):
+            raise NotImplementedError(
+                "redo_score_after_ln=true is only meaningful for post-activation "
+                "LayerNorm. Got use_layernorm="
+                f"{self._use_ln}, preactivation_layer_norm={self._preact_ln}."
+            )
         # Observe-only mode (redo_apply=false): compute dormant_neurons but skip
         # the param/optim recycle. Lets us instrument vanilla DQN with the same
         # logging path so the comparison baseline shares this agent's encoder.
@@ -109,10 +120,15 @@ class DQN_ReDo(DQN):
                     f"(got {stage_name}_layers={n_layers}). "
                     "Multi-layer per stage walks are not implemented."
                 )
+            # ReLU is a free function, so accumulatingSequence uses its bare
+            # __name__ for every stage. LayerNorm is a Haiku module and gets
+            # globally indexed by Haiku (layer_norm, layer_norm_1, ...), so its
+            # probe key must use the same ln_idx that names the params.
+            probe = ln_name(ln_idx) if self._score_after_ln else "relu"
             self._stage_plan.append(
                 {
                     "stage": stage_name,
-                    "act_key": f"{stage_name}/relu",
+                    "act_key": f"{stage_name}/{probe}",
                     "linear_name": linear_name(linear_idx),
                     "ln_name": ln_name(ln_idx) if self._use_ln else None,
                 }
