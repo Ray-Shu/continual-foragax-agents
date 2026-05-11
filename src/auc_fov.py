@@ -113,6 +113,45 @@ def plot_auc_fov(args, metric: str = METRIC, last_percent: float = LAST_PERCENT)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
+    # Inline labels (match original figure style)
+    label_display = {"Search-Oracle": "Search Oracle", "Search-Nearest": "Search Nearest"}
+    if sorted_apertures:
+        x_left, x_right = sorted_apertures[0], sorted_apertures[-1]
+        x_mid = sorted_apertures[len(sorted_apertures) // 2]
+
+        if dqn_values:
+            ax.annotate(
+                "DQN",
+                xy=(x_mid, dqn_values[len(dqn_values) // 2]),
+                xytext=(6, 10),
+                textcoords="offset points",
+                color=COLOR_MAP_FOV["DQN"],
+                fontsize=16,
+                fontweight="bold",
+            )
+
+        for alg in ["Search-Oracle", "Search-Nearest", "Random"]:
+            if alg not in baselines:
+                continue
+            mean_val, _ = baselines[alg]
+            color = COLOR_MAP_FOV.get(alg, "#000000")
+            display = label_display.get(alg, alg)
+            # Search-Oracle label on left, others on right (like original)
+            if alg == "Search-Oracle":
+                x_pos, ha, dx = x_left, "left", 4
+            else:
+                x_pos, ha, dx = x_right, "right", -4
+            ax.annotate(
+                display,
+                xy=(x_pos, mean_val),
+                xytext=(dx, 8),
+                textcoords="offset points",
+                color=color,
+                fontsize=16,
+                fontweight="bold",
+                ha=ha,
+            )
+
     plot_name = args.plot_name or 'auc_fov'
     save_plot(fig, args.experiment_path, plot_name, args.save_type)
 
