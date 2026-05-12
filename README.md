@@ -131,8 +131,8 @@ to `scripts/slurm.py`, one per algorithm:
 
 ```bash
 python scripts/slurm.py \
-    --cluster clusters/vulcan-gpu-vmap-24.json \
-    --time 03:00:00 --runs 10 --force \
+    --cluster clusters/vulcan-gpu-vmap-32G.json \
+    --tasks 24 --time 03:00:00 --runs 10 --force \
     --entry src/rtu_ppo.py \
     -e experiments/E136-big/foragax-sweep/ForagaxBig-v5/9/PPO-RTU_LN_128_HT.json
 ```
@@ -144,11 +144,12 @@ as per k%-tuning [1] (10% of the 10M-step evaluation budget);
 `experiment.seed_offset: 1_000_000` keeps sweep seeds disjoint from
 evaluation seeds.
 
-**Cluster JSONs** in `clusters/` choose the resource shape:
-- `vulcan-gpu-vmap-24.json` — vmap'd PPO across multiple seeds on one GPU.
-- `vulcan-cpu-32G.json` — DQN on CPU.
-- `vulcan-gpu-mps.json` — DRQN with NVIDIA MPS for GPU sharing.
-- `fir-*.json` — equivalents for Fir.
+**Cluster JSONs** in `clusters/` choose the resource shape — names encode
+the hardware (memory, GPU type); task count and time are passed at the
+call site via `--tasks N` and `--time HH:MM:SS`:
+- `vulcan-gpu-vmap-32G.json` / `-vmap.json` (64G) / `-vmap-128G.json` —
+  vmap'd PPO across multiple seeds on one GPU; pick the memory tier you need.
+- `vulcan-gpu.4-vmap.json` — quarter L40S (softMIG)
 
 Run with:
 
@@ -334,7 +335,9 @@ The load-bearing libraries (full list in `pyproject.toml`):
 **What's a good size for cluster jobs?**
 Aim for jobs that run between 1 and 12 hours; ~3 hours is the sweet spot on
 the Compute Canada queue. The vmap-based JSONs in `clusters/` (e.g.
-`vulcan-gpu-vmap-24.json`) bundle many seeds into one job and are highly efficient. To estimate task count for a config:
+`vulcan-gpu-vmap-32G.json`) bundle many seeds into one job and are highly
+efficient — pass `--tasks N` to set how many seeds get packed per vmap. To
+estimate task count for a config:
 
 ```python
 import experiment.ExperimentModel as Experiment
