@@ -7,6 +7,8 @@
 #SBATCH --output=/scratch/%u/logs/slurm-%j.out
 #SBATCH --time=01:00:00
 
+set -e
+
 module load arrow/19
 
 cp -R .venv $SLURM_TMPDIR
