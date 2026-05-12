@@ -1,7 +1,7 @@
 {
     "agent": "Search-Nearest",
     "problem": "Foragax",
-    "total_steps": 10000000,
+    "total_steps": 500000,
     "episode_cutoff": -1,
     "metaParameters": {
         "environment": {
@@ -10,9 +10,9 @@
             "observation_type": "object"
         },
         "channel_priorities": {
-            "0": -1,
-            "1": 2,
-            "2": 1
+            "1": 1, 
+            "2": 1,  
+            "3": 1   
         },
         "experiment": {
             "seed_offset": 0,
