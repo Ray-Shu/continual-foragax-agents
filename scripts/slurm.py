@@ -41,6 +41,12 @@ parser.add_argument("--exclude", type=str, nargs="+", default=[])
 parser.add_argument("-i", "--idxs", type=int, nargs="+", default=None)
 parser.add_argument("--time", type=str, default=None)
 parser.add_argument(
+    "--tasks",
+    type=int,
+    default=None,
+    help="Override both tasks_per_core and tasks_per_vmap with this value.",
+)
+parser.add_argument(
     "--account",
     type=str,
     default=None,
@@ -119,6 +125,10 @@ slurm = fromFile(cmdline.cluster)
 # Override time if provided
 if cmdline.time is not None:
     slurm = dataclasses.replace(slurm, time=cmdline.time)
+if cmdline.tasks is not None:
+    slurm = dataclasses.replace(
+        slurm, tasks_per_core=cmdline.tasks, tasks_per_vmap=cmdline.tasks
+    )
 
 threads = slurm.threads_per_task if isinstance(slurm, SingleNodeOptions) else 1
 tasks_per_core = slurm.tasks_per_core if isinstance(slurm, SingleNodeOptions) else 1
