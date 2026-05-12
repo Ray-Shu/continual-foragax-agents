@@ -185,6 +185,10 @@ def read_metrics_from_data(
     df = pl.concat(datas.values(), how="diagonal")
     del datas
     gc.collect()
+    # rewards / derived metrics are stored as float16 in the .npz files
+    # (continuing_main.py); polars panics on float16 group_by/agg, so widen
+    # to float32 before any downstream rlevaluation aggregation.
+    df = df.with_columns(pl.col(pl.Float16).cast(pl.Float32))
     return df.lazy()
 
 
