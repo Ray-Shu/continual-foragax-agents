@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=aip-amw8
 #SBATCH --job-name=XN33-ForagaxSquareWaveTwoBiome-v11_foragax-sweep_ForagaxSquareWaveTwoBiome-v11_process_hypers
-#SBATCH --mem-per-cpu=128G
+#SBATCH --mem-per-cpu=8G
 #SBATCH --ntasks=1
 #SBATCH --output=/scratch/%u/logs/slurm-%j.out
 #SBATCH --time=2:00:00
