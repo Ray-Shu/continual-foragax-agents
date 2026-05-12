@@ -8,9 +8,6 @@ results.tar
 .tmp/
 {$SCRATCH}/
 
-# ignore all plots
-experiments/**/plots
-
 # ignore python caches
 env/
 .venv/

@@ -47,7 +47,7 @@ COLORS = {
     "Search-Nearest": "#ea4335",  # GDMColor.RED
 }
 
-METRIC = "rolling_reward_10000"
+METRIC = "ewm_reward"
 LAST_PERCENT = 0.1
 APERTURES = [3, 5, 7, 9, 11, 13, 15]
 
