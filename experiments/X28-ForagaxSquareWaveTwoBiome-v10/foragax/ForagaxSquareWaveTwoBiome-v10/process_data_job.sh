@@ -3,7 +3,7 @@
 #SBATCH --job-name=X28-ForagaxSquareWaveTwoBiome-v10_foragax_ForagaxSquareWaveTwoBiome-v10_process_data
 #SBATCH --mem-per-cpu=8G
 #SBATCH --ntasks=16
-#SBATCH --output={$SCRATCH}/slurm-%j.out
+#SBATCH --output=/scratch/%u/logs/slurm-%j.out
 #SBATCH --time=01:59:00
 
 module load arrow/19

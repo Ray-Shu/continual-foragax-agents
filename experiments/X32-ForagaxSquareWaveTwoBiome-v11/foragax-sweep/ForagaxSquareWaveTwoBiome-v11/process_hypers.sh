@@ -3,7 +3,7 @@
 #SBATCH --job-name=X32-ForagaxSquareWaveTwoBiome-v11_foragax-sweep_ForagaxSquareWaveTwoBiome-v11_process_hypers
 #SBATCH --mem-per-cpu=64G
 #SBATCH --ntasks=1
-#SBATCH --output=../slurm-%j.out
+#SBATCH --output=/scratch/%u/logs/slurm-%j.out
 #SBATCH --time=2:00:00
 
 module load arrow/19

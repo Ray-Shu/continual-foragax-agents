@@ -3,7 +3,7 @@
 #SBATCH --job-name=E123-two-biome_foragax_ForagaxSineTwoBiome-v1_process_data
 #SBATCH --mem-per-cpu=16G
 #SBATCH --ntasks=16
-#SBATCH --output=../slurm-%j.out
+#SBATCH --output=/scratch/%u/logs/slurm-%j.out
 #SBATCH --time=01:00:00
 
 module load arrow/19

@@ -3,7 +3,7 @@
 #SBATCH --job-name=E99_process_data-weather_foragax_ForagaxWeather-v5
 #SBATCH --mem-per-cpu=16G
 #SBATCH --ntasks=16
-#SBATCH --output=../slurm-%j.out
+#SBATCH --output=/scratch/%u/logs/slurm-%j.out
 #SBATCH --time=01:00:00
 
 module load arrow/19

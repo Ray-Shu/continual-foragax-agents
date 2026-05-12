@@ -3,7 +3,7 @@
 #SBATCH --job-name=X10-ForagaxWeatherWaveTwoBiome-v3_foragax-sweep_ForagaxWeatherWaveTwoBiome-v3_process_hypers
 #SBATCH --mem-per-cpu=128G
 #SBATCH --ntasks=1
-#SBATCH --output={$SCRATCH}/slurm-%j.out
+#SBATCH --output=/scratch/%u/logs/slurm-%j.out
 #SBATCH --time=2:00:00
 
 module load arrow/19

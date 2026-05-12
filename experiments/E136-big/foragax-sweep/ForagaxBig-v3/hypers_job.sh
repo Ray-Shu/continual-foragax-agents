@@ -3,7 +3,7 @@
 #SBATCH --job-name=E136-big_foragax-sweep_ForagaxBig-v3_hypers
 #SBATCH --mem-per-cpu=8G
 #SBATCH --ntasks=1
-#SBATCH --output=../slurm-%j.out
+#SBATCH --output=/scratch/%u/logs/slurm-%j.out
 #SBATCH --time=01:00:00
 
 module load arrow/19
