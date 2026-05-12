@@ -6,7 +6,6 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Generic, TypeVar
 
-import connectorx as cx
 import ml_instrumentation._utils.sqlite as sqlu
 import numpy as np
 import polars as pl
@@ -209,21 +208,18 @@ def load_all_results_from_data(
     if metrics is None:
         metrics = tables - {"_metadata_"}
 
+    meta = (
+        pl.read_database("SELECT * FROM _metadata_", con).lazy()
+        if "_metadata_" in tables
+        else None
+    )
+
     df = read_metrics_from_data(
         data_path, metrics, ids, sample, sample_type, start, end
     )
 
-    if "_metadata_" not in tables:
+    if meta is None:
         return df.collect()
-
-    meta: pl.DataFrame = cx.read_sql(
-        f"sqlite://{db_path}",
-        "SELECT * FROM _metadata_",
-        return_type="polars",
-        partition_on="id",
-        partition_num=1,
-    )
-    meta = meta.lazy()
 
     if "id" not in df.columns:
         return pl.DataFrame()
