@@ -1,1 +1,2 @@
-python src/learning_curve.py experiments/E138-two-biome-large/foragax/ForagaxTwoBiomeLarge-v1 --plot-name fig9_morel_2biome_fov --filter-alg-apertures DQN:3 DQN:5 DQN:7 DQN:9 DQN:11 DQN:13 DQN:15 Search-Oracle Random Search-Nearest --metric rolling_reward_10000 --ylim 0 1.5
+python experiments/E138-two-biome-large/foragax/ForagaxTwoBiomeLarge-v1/plot_paper_style.py
+python experiments/E138-two-biome-large/foragax/ForagaxTwoBiomeLarge-v1/auc_fov_paper_style.py
