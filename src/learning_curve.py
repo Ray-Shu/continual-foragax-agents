@@ -685,7 +685,7 @@ def main():
             if len(cell_algs) > 1:
                 handles, labels = ax.get_legend_handles_labels()
                 mapped_labels = [get_mapped_label(label, LABEL_MAP, disable_fov=args.disable_fov) for label in labels]
-                ax.legend(handles, mapped_labels, title=None, frameon=False, loc='best')
+                ax.legend(handles, mapped_labels, title=None, frameon=False, loc='upper left', bbox_to_anchor=(1.05, 1))
 
             if args.vertical_lines:
                 for x in args.vertical_lines:
@@ -807,7 +807,7 @@ def main():
         else:
             handles, labels = axes[0].get_legend_handles_labels()
             mapped_labels = [get_mapped_label(label, LABEL_MAP, disable_fov=args.disable_fov) for label in labels]
-            axes[0].legend(handles, mapped_labels, title=None, frameon=False)
+            axes[0].legend(handles, mapped_labels, title=None, frameon=False, loc='upper left', bbox_to_anchor=(1.05, 1))
     else:
         # Original plotting logic for metrics
         ax_auc = None
@@ -1056,7 +1056,7 @@ def main():
 
             mapped_labels = [get_mapped_label(label, LABEL_MAP, disable_fov=args.disable_fov) for label in labels]
             if handles:
-                legend_obj = ax_for_legend.legend(handles, mapped_labels, title=None, frameon=True, loc='best')
+                legend_obj = ax_for_legend.legend(handles, mapped_labels, title=None, frameon=True, loc='upper left', bbox_to_anchor=(1.05, 1))
                 legend_obj.get_frame().set_alpha(0.9)
                 legend_obj.get_frame().set_facecolor('white')
 

@@ -1,10 +1,11 @@
 EXP=experiments/XN34-TwoBiomeLarge/foragax/ForagaxTwoBiomeLarge-v1
 
+'''
 # Plot AUC vs Field of View across all FOVs
 python src/auc_fov.py $EXP \
     --plot-name auc_fov
 
-'''
+
 # Dont need this for now. 
 
 # Per-FOV learning curves of DQN against the three baselines
