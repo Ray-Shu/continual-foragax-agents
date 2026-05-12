@@ -4,8 +4,10 @@
 #SBATCH --mem=500G
 #SBATCH --nodes=1
 #SBATCH --ntasks=8
-#SBATCH --output=../slurm-%j.out
+#SBATCH --output=/scratch/%u/logs/slurm-%j.out
 #SBATCH --time=06:00:00
+
+set -e
 
 module load arrow/19
 
