@@ -79,7 +79,11 @@ nvidia-cuda-mps-control -d"""
         * slurm.tasks_per_core
         / slurm.tasks_per_vmap
     )
-    max_xla_python_client_mem_fraction = 0.95 if jobs == 1 else 0.3
+    if slurm.xla_python_client_mem_fraction is not None:
+        xla_mem_fraction = slurm.xla_python_client_mem_fraction
+    else:
+        max_xla_python_client_mem_fraction = 0.95 if jobs == 1 else 0.3
+        xla_mem_fraction = max_xla_python_client_mem_fraction / jobs
     return f"""#!/bin/bash
 
 {exclude_str}
@@ -92,7 +96,7 @@ export OPENBLAS_NUM_THREADS={slurm.threads_per_task}
 export MKL_NUM_THREADS={slurm.threads_per_task}
 export NPROC={slurm.threads_per_task}
 export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads={slurm.threads_per_task}"
-export XLA_PYTHON_CLIENT_MEM_FRACTION={max_xla_python_client_mem_fraction / jobs}
+export XLA_PYTHON_CLIENT_MEM_FRACTION={xla_mem_fraction}
 {device_str}
 
 {parallel}
