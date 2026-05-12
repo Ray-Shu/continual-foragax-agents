@@ -87,34 +87,33 @@ because that is what the `E136-big` example scripts use.
 
 ```bash
 ssh vulcan
+cd ~/scratch
 git clone git@github.com:steventango/continual-foragax-agents.git
 cd continual-foragax-agents
-./scripts/setup_cc.sh
-mkdir -p /scratch/$USER/logs   # one-time; per-experiment job scripts write slurm-%j.out here
+
+# One-time: install uv if you don't already have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+
+# Install the project + CUDA-enabled JAX into .venv/
+uv sync --group cuda
 ```
 
-`scripts/setup_cc.sh` does two things:
-
-1. Loads `python/3.11 arrow/19 gcc`, creates `~/.venv` (the **launcher** venv,
-   used by `scripts/slurm.py` itself), and pip-installs `PyExpUtils-andnp` and
-   `ml-instrument` into it.
-2. Submits `scripts/local_node_venv.sh` as a short Slurm job that builds the
-   project `.venv` on a compute node (loads `opencv rust swig`, runs
-   `pip install -e .` in `$SLURM_TMPDIR`, then copies the resulting `.venv`
-   back into the project directory).
+`uv sync --group cuda` resolves `pyproject.toml` + `uv.lock`, prefers
+prebuilt wheels (avoiding the long Rust compile of `polars-runtime-*`
+that breaks login-node memory limits), and includes the optional `cuda`
+dependency group for GPU jobs.
 
 > **Allocation accounts.** `scripts/slurm.py` auto-detects your SLURM
 > account from `sacctmgr` (priority `rrg-` > `aip-` > `def-`, randomized
 > within a tier per job to spread load). Pass `--account=<name>` on the
-> CLI to pin a specific account. `scripts/local_node_venv.sh` and the
-> per-experiment `*_job.sh` files still hardcode `--account=` and need
-> manual edits.
+> CLI to pin a specific account. The per-experiment `*_job.sh` files
+> still hardcode `--account=` and need manual edits.
 
-Wait for the build job to finish, confirm there is a `.venv/` in the project
-root, and you are ready to schedule sweeps. Each new shell needs:
+Confirm `.venv/` is in the project root. Each new shell needs:
 
 ```bash
-source ~/.venv/bin/activate      # the launcher venv
+source .venv/bin/activate
 sq                               # check job status
 ```
 
@@ -275,8 +274,6 @@ clusters/                   # Slurm resource templates (vulcan / cedar / fir)
 scripts/
     slurm.py                # cluster job submission
     local.py                # local multi-seed driver
-    setup_cc.sh             # one-time CC bootstrap
-    local_node_venv.sh      # builds project .venv on a compute node
     generate_frozen_configs.py
     ...                     # other one-off helpers
 ```
