@@ -77,6 +77,9 @@ class AgentState(BaseAgentState):
 
 @checkpointable(("buffer", "steps", "state", "updates"))
 class NNAgent(BaseAgent):
+    # Env steps between `_periodic_step` firings; None = no periodic op.
+    periodic_freq: Optional[int] = None
+
     def __init__(
         self,
         observations: Tuple[int, ...],
@@ -211,7 +214,11 @@ class NNAgent(BaseAgent):
 
         dummy_hint = None
         dummy_hint_trace = None
-        if isinstance(observations, Mapping) and "hint" in observations and "hint" in self.scalar_features:
+        if (
+            isinstance(observations, Mapping)
+            and "hint" in observations
+            and "hint" in self.scalar_features
+        ):
             dummy_hint = jnp.zeros(observations["hint"])
         if (
             isinstance(observations, Mapping)
@@ -377,6 +384,12 @@ class NNAgent(BaseAgent):
             lambda s: s,
             state,
         )
+
+    def _periodic_step(self, state: AgentState) -> AgentState:
+        # Override here rather than gating with a per-step `jax.lax.cond`:
+        # under vmap, cond is rewritten to select and both branches execute
+        # every step. The training loop dispatches this from an outer scan.
+        return state
 
     def _advance_update_clock(self, state: AgentState) -> AgentState:
         state = replace(state, steps=state.steps + 1)

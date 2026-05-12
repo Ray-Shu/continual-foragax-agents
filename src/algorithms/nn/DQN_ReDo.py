@@ -65,9 +65,7 @@ class DQN_ReDo(DQN):
                 "DQN_ReDo no longer supports the legacy `layers` knob; "
                 "use pre_core_layers/core_layers/post_core_layers instead."
             )
-        if (
-            self._pre_core_layers + self._core_layers + self._post_core_layers
-        ) < 1:
+        if (self._pre_core_layers + self._core_layers + self._post_core_layers) < 1:
             raise NotImplementedError(
                 "DQN_ReDo on ForagerNet expects at least one of "
                 "pre_core_layers, core_layers, post_core_layers >= 1; "
@@ -170,6 +168,11 @@ class DQN_ReDo(DQN):
         assert isinstance(adam_state, optax.ScaleByAdamState), (
             "DQN_ReDo expects an Adam-based optimizer chain whose first element "
             f"is optax.ScaleByAdamState; got {type(adam_state).__name__}."
+        )
+
+        # redo_freq is in agent updates; periodic_freq is in env steps.
+        self.periodic_freq = int(params["redo_freq"]) * int(
+            self.state.hypers.update_freq
         )
 
     def _score(self, activation: jax.Array) -> jax.Array:
@@ -300,9 +303,7 @@ class DQN_ReDo(DQN):
         adam_state: optax.ScaleByAdamState = state.optim[0]  # type: ignore
         new_mu = jax.tree.map(reset_momentum, adam_state.mu, mask)
         new_nu = jax.tree.map(reset_momentum, adam_state.nu, mask)
-        new_adam_state = optax.ScaleByAdamState(
-            adam_state.count, mu=new_mu, nu=new_nu
-        )
+        new_adam_state = optax.ScaleByAdamState(adam_state.count, mu=new_mu, nu=new_nu)
         new_optim = (new_adam_state, *state.optim[1:])  # type: ignore
 
         dormant_neurons = total_dormant / total_neurons
@@ -315,17 +316,5 @@ class DQN_ReDo(DQN):
             state, key=key, params=new_params, optim=new_optim, metrics=new_metrics
         )
 
-    def _update_state_with_metrics(self, state: AgentState) -> AgentState:
-        # `redo_freq` is counted in *agent updates*, not env steps. The
-        # `state.updates != prev_updates` guard skips env steps where no
-        # update fired, otherwise redo would re-trigger every env step once
-        # `state.updates` divides `redo_freq`.
-        prev_updates = state.updates
-        state = super()._update_state_with_metrics(state)
-        do_redo = (
-            (state.updates != prev_updates)
-            & (state.updates > 0)
-            & (state.updates % state.hypers.redo_freq == 0)
-            & self.buffer.can_sample(state.buffer_state)
-        )
-        return jax.lax.cond(do_redo, self._redo_step, lambda s: s, state)
+    def _periodic_step(self, state: AgentState) -> AgentState:
+        return self._redo_step(state)

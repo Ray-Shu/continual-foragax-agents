@@ -4,7 +4,7 @@
     "total_steps": 10000000,
     "episode_cutoff": -1,
     "metaParameters": {
-        "epsilon": 0.1,
+        "epsilon": 0.25,
         "target_refresh": 128,
         "buffer_size": 1000,
         "buffer_min_size": 50,
@@ -20,7 +20,7 @@
         "gamma": 0.99,
         "optimizer": {
             "name": "Adam",
-            "alpha": 0.001,
+            "alpha": 0.003,
             "beta1": 0.9,
             "beta2": 0.999,
             "eps": 1e-05
@@ -38,7 +38,7 @@
         },
         "update_freq": 4,
         "redo_freq": 2500,
-        "redo_threshold": 0.025,
+        "redo_threshold": 0.01,
         "redo_reset_layernorm": true,
         "redo_score_after_ln": true
     }
