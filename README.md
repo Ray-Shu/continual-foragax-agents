@@ -90,6 +90,7 @@ ssh vulcan
 git clone git@github.com:steventango/continual-foragax-agents.git
 cd continual-foragax-agents
 ./scripts/setup_cc.sh
+mkdir -p /scratch/$USER/logs   # one-time; per-experiment job scripts write slurm-%j.out here
 ```
 
 `scripts/setup_cc.sh` does two things:
