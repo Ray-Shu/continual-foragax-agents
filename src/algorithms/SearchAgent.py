@@ -1,6 +1,6 @@
 from dataclasses import replace
 from functools import partial
-from typing import Dict, Optional, Tuple, Union, Mapping
+from typing import Dict, Optional, Tuple, Mapping
 
 import jax
 import jax.numpy as jnp
@@ -14,6 +14,7 @@ from utils.queue import Queue, dequeue, enqueue
 @cxu.dataclass
 class AgentState:
     key: jax.Array
+    steps: int = 0
 
 
 class SearchAgent(BaseAgent):
@@ -131,7 +132,7 @@ class SearchAgent(BaseAgent):
             obs = obs[:, :, :-1]
             num_channels -= 1
         else:
-            center_y, center_x = height // 2, width // 2
+            center_y, center_x = jnp.asarray(height // 2), jnp.asarray(width // 2)
 
         # Create priority map: higher values = higher priority
         priority_map = jnp.zeros((height, width))
