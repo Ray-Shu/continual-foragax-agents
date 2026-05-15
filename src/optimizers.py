@@ -227,3 +227,68 @@ def selective_weight_reinitialization(
         return new_updates, new_state
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)  # type: ignore
+
+
+class UPGDState(NamedTuple): 
+    """State for Utility based Perturbed Gradient Descent optimizer."""
+    step: chex.Array 
+    utility_history: optax.Params
+    rng_key: chex.PRNGKey 
+
+
+def upgd_optimizer(
+    step_size: float, 
+    utility_decay_rate: float, 
+    noise: float, 
+    utility: float, 
+    seed: int = 0,
+
+)-> optax.GradientTransformation:
+    """Optax GradientTransformation for Utility based Perturbed Gradient Descent.
+
+    Arguments:
+        step_size: the learning rate alpha
+        utility_decay_rate: the decay rate of ulity beta 
+        nosie: gaussian noise added to the gradient 
+        utility: the utility measurement U: [0, 1]
+        seed: random seed for reinitialization
+    """
+    
+    def init_fn(params):
+        """Called ONCE at the start. params is your network weights.
+        Returns: initial state object
+        """
+        return MyState(
+            step=0,
+            utility=jax.tree.map(lambda p: jnp.zeros(p.shape), params),
+            key=jax.random.PRNGKey(seed),
+        )
+    
+    def update_fn(updates, state, params=None, grad=None):
+        """Called EVERY training step. 
+        Args:
+          updates: the gradients coming FROM the previous optimizer in the chain (or raw gradients)
+          state: current optimizer state
+          params: the CURRENT network weights (optional, but UPGD needs this)
+          grad: the ORIGINAL gradients (optional, but UPGD needs this for utility)
+        
+        Returns: (new_updates, new_state)
+          new_updates: transformed gradients to pass to next optimizer
+          new_state: updated state object
+        """
+        new_step = state.step + 1
+        
+        # Transform the updates/gradients here
+        # Use grad and params to compute utility
+        # Add noise
+        # Weight by utility
+        # Return modified updates
+        
+        new_state = MyState(
+            step=new_step,
+            utility=new_utility,
+            key=new_key,
+        )
+        return new_updates, new_state
+    
+    return optax.GradientTransformationExtraArgs(init_fn, update_fn)
