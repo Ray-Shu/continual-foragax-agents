@@ -292,11 +292,14 @@ def upgd_optimizer(
             new_avg_utility
         )
 
-        # global scaling / normalizing of utility over layer l (eta) 
+        # global scaling / normalizing of utility over layer l (eta)
         eta = jax.tree_util.tree_reduce(
-            lambda acc, x: jnp.maximum(acc, jnp.max(x)), 
-            u_hat, jnp.array(-jnp.inf) 
+            lambda acc, x: jnp.maximum(acc, jnp.max(x)),
+            u_hat, jnp.array(-jnp.inf)
         )
+        # Guard: if all utilities are <= 0 (e.g. all-zero batch, first step
+        # before signal builds up), eta=0 makes U_hat/eta = 0/0 = NaN.
+        eta = jnp.maximum(eta, 1e-8)
 
         # scaled utility U_bar = phi(U_hat_l / eta) in [0, 1]
         u_bar = jax.tree.map( 

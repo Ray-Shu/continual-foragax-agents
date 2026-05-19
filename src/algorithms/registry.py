@@ -6,6 +6,7 @@ from algorithms.MCTSAgent import MCTSAgent
 from algorithms.nn.AADRQN import AADRQN
 from algorithms.nn.ATAADRQN import ATAADRQN
 from algorithms.nn.DQN import DQN
+from algorithms.nn.DQN_UPGD import DQN_UPGD
 from algorithms.nn.DQN_Hare_and_Tortoise import DQN_Hare_and_Tortoise
 from algorithms.nn.DQN_L2 import DQN_L2
 from algorithms.nn.DQN_L2_Init import DQN_L2_Init
@@ -62,6 +63,9 @@ def getAgent(name) -> Type[BaseAgent]:
 
     if name.startswith("PT_DQN"):
         return PT_DQN
+
+    if name.startswith("DQN_UPGD"):
+        return DQN_UPGD
 
     if name.startswith("DQN"):
         return DQN
