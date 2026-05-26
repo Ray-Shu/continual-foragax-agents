@@ -1,7 +1,7 @@
 """HesScale: a diagonal Hessian approximation propagated by a custom backward pass.
 
 Used by UPGD (see optimizers.upgd_optimizer) to obtain the second-order utility
-M_l = 1/2 S_l W_l^2 - F_l W_l   (importance of each weight).
+M_l = 1/2 S_l W_l^2 - F_l W_l 
 
 Public API
 ----------
@@ -44,7 +44,6 @@ def relu_p(a):   return (a > 0.0).astype(a.dtype)        # sigma'
 def relu_pp(a):  return jnp.zeros_like(a)                # sigma''  (0 for ReLU)
 
 
-# --- linear-layer kinds ------------------------------------------------------
 def lin_dense(params, h):
     """Dense pre-activation. Accepts 1-D or N-D h (flattens before matmul)."""
     W, b = params
@@ -63,7 +62,6 @@ def make_conv_lin(stride=1, padding="VALID"):
     return lin
 
 
-# --- per-sample forward (with cache) + custom backward -----------------------
 def forward_with_cache(layers, x, scalars=None):
     """Run the tagged layer list forward.
 

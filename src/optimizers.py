@@ -279,12 +279,15 @@ def upgd_optimizer(
             lambda S, F, W: 0.5 * S * W**2 - F * W, 
             hess_diag, grad, params
         )
+
+        print("RAW UTILITY:", M)
         
         # running average U_l 
         new_avg_utility = jax.tree.map( 
             lambda u, m: utility_decay_rate * u + (1.0 - utility_decay_rate) * m,
             state.avg_utility, M
         )
+        print("RUNNING AVG UTILITY:", new_avg_utility)
 
         # bias correction U_hat_l 
         u_hat = jax.tree.map( 
@@ -306,6 +309,8 @@ def upgd_optimizer(
             lambda x: jax.nn.sigmoid(x / eta), 
             u_hat
         )
+
+        print("U_BAR:", u_bar)
         
         # gaussian perturbation     
         leaves, treedef = jax.tree_util.tree_flatten(params) 
@@ -315,6 +320,8 @@ def upgd_optimizer(
             [noise * jax.random.normal(k, p.shape) 
              for k, p in zip(leaf_keys, leaves)]
         )
+
+        print("PERTURB:", xi)
 
         # weight update
         new_updates = jax.tree.map( 

@@ -58,6 +58,12 @@ dev = [
     'pre-commit',
     'pytest>=9.0.3',
 ]
+# Temporary group for local Jupyter-driven UPGD development.
+# Delete this whole group (and the entry under [tool.uv]) before PR'ing upstream.
+notebooks = [
+    'jupyter>=1.0.0',
+    'ipykernel>=6.29.0',
+]
 
 [tool]
 [tool.commitizen]
