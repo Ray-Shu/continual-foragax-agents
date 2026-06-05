@@ -43,7 +43,12 @@ from experiment import ExperimentModel
 from utils.checkpoint import Checkpoint
 from utils.ml_instrumentation.Sampler import Mean
 from utils.ml_instrumentation.utils import Last
-from utils.ppo_metrics import compute_ppo_metrics, nan_ppo_metrics
+from utils.ppo_metrics import (
+    compute_ppo_metrics,
+    nan_ppo_metrics,
+    nan_weight_norm,
+    weight_norm,
+)
 from utils.preempt import TimeoutHandler
 
 sys.path.insert(0, os.path.abspath("/tmp/src"))
@@ -123,6 +128,9 @@ class TrainConfig:
     compute_ntk: bool = struct.field(pytree_node=False)
     ntk_freq: int = struct.field(pytree_node=False)
     n_ref: int = struct.field(pytree_node=False)
+    # Weight-norm metric -- independent cadence / flag from the NTK metrics above
+    compute_weight_norm: bool = struct.field(pytree_node=False)
+    weight_norm_freq: int = struct.field(pytree_node=False)
     # ---- DYNAMIC (may vary per idx; arithmetic only) ----
     max_grad_norm: float
     l2_reg_pi: float
@@ -1193,6 +1201,23 @@ def experiment(rng, config: TrainConfig):
         else:
             ntk_metrics = nan_ppo_metrics()
 
+        # Weight norm: global L2 norm of the post-update params, gated on its own
+        # weight_norm_freq (independent of the NTK cadence above).  Cheap -- no
+        # reference batch or Jacobian -- so this is just an L2 reduction over the
+        # param tree.  NaN on non-metric updates / when disabled.  Per-update scalar.
+        if config.compute_weight_norm:
+            is_wn_step = _crossed_interval(
+                start_timestep, log_env_state.timestep, config.weight_norm_freq
+            )
+            weight_norm_metric = jax.lax.cond(
+                is_wn_step,
+                lambda _: weight_norm(ntk_params_after),
+                lambda _: nan_weight_norm(),
+                operand=None,
+            )
+        else:
+            weight_norm_metric = nan_weight_norm()
+
         # Collect a scalar reward summary for this iteration (mean reward over rollout)
         rewards = traj_batch.reward
         pos = traj_batch.info["pos"]
@@ -1246,6 +1271,7 @@ def experiment(rng, config: TrainConfig):
             biome_regret,
             biome_rank,
             ntk_metrics,
+            weight_norm_metric,
         )
 
     # Run training loop with lax.scan (collect per-iteration rewards)
@@ -1264,6 +1290,7 @@ def experiment(rng, config: TrainConfig):
         biome_regret,
         biome_rank,
         ntk_metrics,
+        weight_norm_metric,
     ) = info
     rewards = rewards.reshape((-1))
     pos = pos.reshape((-1, pos.shape[-1]))
@@ -1303,6 +1330,7 @@ def experiment(rng, config: TrainConfig):
             policy_ntk_cond,
             policy_churn,
         ),
+        weight_norm_metric,
         frames,
     )
 
@@ -1411,6 +1439,12 @@ def main():
         ntk_freq = int(hypers.get("experiment", {}).get("ntk_freq", 0))
         compute_ntk = ntk_freq > 0
         n_ref = int(hypers.get("experiment", {}).get("x_ref_steps", 128))
+        # Weight norm: independent of the NTK metrics, controlled by its own
+        # experiment.weight_norm_freq (env steps, rounded up to rollout_steps).
+        weight_norm_freq = int(
+            hypers.get("experiment", {}).get("weight_norm_freq", 0)
+        )
+        compute_weight_norm = weight_norm_freq > 0
         config = TrainConfig(
             d_hidden=int(hypers["representation"]["d_hidden"]),
             agent_type=exp.agent,
@@ -1503,6 +1537,8 @@ def main():
             compute_ntk=compute_ntk,
             ntk_freq=max(ntk_freq, 1),
             n_ref=n_ref,
+            compute_weight_norm=compute_weight_norm,
+            weight_norm_freq=max(weight_norm_freq, 1),
         )
         configs.append(config)
 
@@ -1526,6 +1562,7 @@ def main():
             policy_ntk_cond,
             policy_churn,
         ),
+        weight_norm_metric,
         frames,
     ) = results
 
@@ -1557,6 +1594,7 @@ def main():
         run_policy_ntk_rank = policy_ntk_rank[i]
         run_policy_ntk_cond = policy_ntk_cond[i]
         run_policy_churn = policy_churn[i]
+        run_weight_norm = weight_norm_metric[i]
         run_frames = frames[i]
         start_time = time.time()
         # for reward in run_rewards:
@@ -1607,6 +1645,7 @@ def main():
             policy_ntk_rank=run_policy_ntk_rank,
             policy_ntk_cond=run_policy_ntk_cond,
             policy_churn=run_policy_churn,
+            weight_norm=run_weight_norm,
         )
         total_numpy_time += time.time() - start_time
 

@@ -1,11 +1,11 @@
 """Plot NTK metrics (rank, condition number, churn) over training.
 
 Examples:
-    python scripts/plot_ntk_metrics.py \
+    python scripts/plot_metrics.py \
         -e experiments/E136-big/foragax/ForagaxBig-v5 \
         -a DQN -f 9
 
-    python scripts/plot_ntk_metrics.py \
+    python scripts/plot_metrics.py \
         -e experiments/X33-ForagaxSquareWaveTwoBiome-v11/foragax/ForagaxSquareWaveTwoBiome-v11 \
         -a PPO_LN_128 -f 9
 """
@@ -50,6 +50,12 @@ def parse_args():
     p.add_argument(
         "-f", "--fov", required=True, type=int, help="Field-of-view / aperture size"
     )
+    p.add_argument(
+        "--test",
+        action="store_true",
+        help="Write the plot to the repo root instead of the experiment's "
+        "metrics/ folder (handy for quick one-off checks).",
+    )
     return p.parse_args()
 
 
@@ -93,6 +99,14 @@ def main():
                 ("ntk_cond", "DQN"),
                 ("value_ntk_cond", "Value (PPO)"),
                 ("policy_ntk_cond", "Policy (PPO)"),
+            ],
+        },
+        {
+            "ylabel": "Weight Norm",
+            "title": "Weight Norm Over Time",
+            "log": False,
+            "series": [
+                ("weight_norm", "PPO"),
             ],
         },
     ]
@@ -196,8 +210,14 @@ def main():
             ax.legend()
 
     plt.tight_layout()
-    metrics_dir.mkdir(parents=True, exist_ok=True)
-    out = metrics_dir / f"ntk_metrics_{args.agent}_{args.fov}.png"
+    # --test dumps the figure in the repo root for a quick look; otherwise it
+    # lands in the experiment's metrics/ folder alongside the other outputs.
+    if args.test:
+        out_dir = ROOT
+    else:
+        out_dir = metrics_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"metrics_{args.agent}_{args.fov}.png"
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved plot to {out}")

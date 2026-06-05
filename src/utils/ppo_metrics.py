@@ -25,6 +25,14 @@ Two heads are measured separately:
 For each head we report the NTK Gram-matrix rank and condition number, plus the
 per-update *churn*: the norm of the change in the head's predictions on a fixed
 reference batch from immediately before to immediately after one PPO update.
+
+Separately -- on its own cadence and config flag, *not* bundled with the NTK /
+churn metrics above -- we report a single global **weight norm**: the L2 norm of
+*all* network parameters (shared torso + both heads) after the update.  It needs
+neither the reference batch nor a Jacobian, so it is essentially free and is
+gated independently (see ``weight_norm`` / ``nan_weight_norm`` and the
+``weight_norm_freq`` config in ``rtu_ppo.py``).  A growing weight norm is a
+common plasticity-loss signature.
 """
 
 from typing import Any, Callable, Tuple
@@ -66,6 +74,26 @@ def _flatten_jacobian(jac_tree: Any, n_rows: int) -> jnp.ndarray:
     leaves = jax.tree_util.tree_leaves(jac_tree)
     flat_leaves = [leaf.reshape(n_rows, -1) for leaf in leaves]
     return jnp.concatenate(flat_leaves, axis=1)
+
+
+def weight_norm(params: Any) -> jnp.ndarray:
+    """Global L2 norm of every parameter leaf in ``params``.
+
+    Concatenating-then-norming is unnecessary: ``sqrt(sum of per-leaf squared
+    sums)`` equals the norm of the fully flattened parameter vector.  Computed on
+    the post-update parameters, matching the NTK convention.
+
+    Returns:
+        A scalar array holding ``||theta||_2``.
+    """
+    leaves = jax.tree_util.tree_leaves(params)
+    sq_sum = sum(jnp.sum(jnp.square(leaf)) for leaf in leaves)
+    return jnp.sqrt(sq_sum)
+
+
+def nan_weight_norm() -> jnp.ndarray:
+    """The ``NaN`` weight-norm scalar emitted on non-metric / disabled updates."""
+    return jnp.float32(jnp.nan)
 
 
 def _ntk_rank_cond(jac_flat: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -182,6 +210,9 @@ def compute_ppo_metrics(
     / ``jax.lax.cond`` and vmapped across runs.  Heads that are disabled (or
     when this is called on a non-metric step via ``lax.cond``) report ``NaN``.
 
+    The weight norm is intentionally *not* computed here -- it has its own
+    cadence and config flag; see ``weight_norm`` / ``nan_weight_norm``.
+
     Args:
         apply_fn: The network ``apply`` function.
         params_before: Parameters before the current PPO update (for churn).
@@ -219,6 +250,6 @@ def compute_ppo_metrics(
 
 
 def nan_ppo_metrics() -> Tuple[jnp.ndarray, ...]:
-    """The all-``NaN`` metric tuple emitted on non-metric updates."""
+    """The all-``NaN`` NTK / churn metric tuple emitted on non-metric updates."""
     nan = jnp.float32(jnp.nan)
     return nan, nan, nan, nan, nan, nan
