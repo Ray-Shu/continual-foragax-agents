@@ -70,8 +70,12 @@ def main():
     # separate `value_*` / `policy_*` columns.  Only the columns actually present in
     # the loaded data are plotted, so this works unchanged for either agent (or a
     # mix), drawing one line per available series.
+    # Panels are laid out on a grid by their `row`: row 0 holds the churn / NTK
+    # metrics, row 1 holds the weight metrics.  Unused cells in a shorter row are
+    # hidden.
     PANELS = [
         {
+            "row": 0,
             "ylabel": "Churn Norm",
             "title": "Churn Over Time",
             "log": False,
@@ -82,6 +86,7 @@ def main():
             ],
         },
         {
+            "row": 0,
             "ylabel": "NTK Rank",
             "title": "NTK Rank Over Time",
             "log": False,
@@ -92,6 +97,7 @@ def main():
             ],
         },
         {
+            "row": 0,
             "ylabel": "NTK Condition Number",
             "title": "NTK Condition Number Over Time",
             "log": True,  # condition numbers span many orders of magnitude
@@ -102,11 +108,23 @@ def main():
             ],
         },
         {
+            "row": 1,
             "ylabel": "Weight Norm",
             "title": "Weight Norm Over Time",
             "log": False,
             "series": [
                 ("weight_norm", "PPO"),
+            ],
+        },
+        {
+            "row": 1,
+            "ylabel": "Weight Drift",
+            "title": "Weight Drift Over Time",
+            "log": False,
+            "series": [
+                ("weight_drift_total", "Total (PPO)"),
+                ("weight_drift_pi", "Actor (PPO)"),
+                ("weight_drift_vf", "Critic (PPO)"),
             ],
         },
     ]
@@ -184,30 +202,46 @@ def main():
         print("The metrics may not have been computed during training.")
         return
 
-    # Plot
-    fig, axes = plt.subplots(1, len(PANELS), figsize=(5 * len(PANELS), 4))
-    if len(PANELS) == 1:
-        axes = [axes]
+    # Plot on a (n_rows x n_cols) grid, where each panel sits in its assigned
+    # `row` and columns are filled left-to-right within a row.  n_cols is the
+    # width of the widest row; leftover cells are hidden.
+    rows = sorted({panel["row"] for panel in PANELS})
+    n_rows = len(rows)
+    n_cols = max(sum(p["row"] == r for p in PANELS) for r in rows)
+    fig, axes = plt.subplots(
+        n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), squeeze=False
+    )
 
-    for ax, panel in zip(axes, PANELS):
-        n_plotted = 0
-        for col, label in panel["series"]:
-            series = metric_series(col)
-            if series is None:
-                continue
-            x, y = series
-            ax.plot(x, y, marker="o", label=label)
-            n_plotted += 1
+    used = set()
+    for r in rows:
+        row_panels = [p for p in PANELS if p["row"] == r]
+        for col_idx, panel in enumerate(row_panels):
+            ax = axes[r][col_idx]
+            used.add((r, col_idx))
+            n_plotted = 0
+            for col, label in panel["series"]:
+                series = metric_series(col)
+                if series is None:
+                    continue
+                x, y = series
+                ax.plot(x, y, marker="o", label=label)
+                n_plotted += 1
 
-        ax.set_xlabel("Step")
-        ax.set_ylabel(panel["ylabel"])
-        ax.set_title(panel["title"])
-        if panel["log"] and n_plotted > 0:
-            ax.set_yscale("log")
-        # Legend only matters when multiple series share a panel (e.g. PPO value vs
-        # policy); a single DQN line doesn't need one.
-        if n_plotted > 1:
-            ax.legend()
+            ax.set_xlabel("Step")
+            ax.set_ylabel(panel["ylabel"])
+            ax.set_title(panel["title"])
+            if panel["log"] and n_plotted > 0:
+                ax.set_yscale("log")
+            # Legend only matters when multiple series share a panel (e.g. PPO
+            # value vs policy); a single DQN line doesn't need one.
+            if n_plotted > 1:
+                ax.legend()
+
+    # Hide any grid cells left empty by a shorter row.
+    for r in range(n_rows):
+        for c in range(n_cols):
+            if (r, c) not in used:
+                axes[r][c].axis("off")
 
     plt.tight_layout()
     # --test dumps the figure in the repo root for a quick look; otherwise it

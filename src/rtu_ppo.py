@@ -45,7 +45,9 @@ from utils.ml_instrumentation.utils import Last
 from utils.ppo_metrics import (
     compute_ppo_metrics,
     nan_ppo_metrics,
+    nan_weight_drift,
     nan_weight_norm,
+    weight_drift,
     weight_norm,
 )
 from utils.preempt import TimeoutHandler
@@ -126,6 +128,10 @@ class TrainConfig:
     # Weight-norm metric -- independent cadence / flag from the NTK metrics above
     compute_weight_norm: bool = struct.field(pytree_node=False)
     weight_norm_freq: int = struct.field(pytree_node=False)
+    # Weight-drift metric (||theta - theta_0||, split pi/vf/total) -- independent
+    # cadence / flag; the diagnostic counterpart to L2-to-init ("w0") reg.
+    compute_weight_drift: bool = struct.field(pytree_node=False)
+    weight_drift_freq: int = struct.field(pytree_node=False)
     # ---- DYNAMIC (may vary per idx; arithmetic only) ----
     max_grad_norm: float
     l2_reg_pi: float
@@ -1056,6 +1062,16 @@ def experiment(rng, config: TrainConfig):
     else:
         x_ref = None
 
+    # Weight-drift reference: a frozen copy of theta_0 for the ||theta - theta_0||
+    # metric.  Deliberately independent of `use_l2_init` (which only allocates
+    # `initial_params` when the mitigation is on) so drift is measurable for the
+    # vanilla agent too -- enabling an apples-to-apples vanilla-vs-w0-reg compare.
+    # Closed over by experiment_step like `x_ref`; never threaded through carry.
+    if config.compute_weight_drift:
+        drift_w0 = jax.tree_util.tree_map(lambda p: p.copy(), network_params)
+    else:
+        drift_w0 = None
+
     env_step_state = (
         train_state,
         gymnax_state,
@@ -1317,6 +1333,24 @@ def experiment(rng, config: TrainConfig):
         else:
             weight_norm_metric = nan_weight_norm()
 
+        # Weight drift: ||theta - theta_0|| (split pi / vf / total), gated on its
+        # own weight_drift_freq.  Like the weight norm it is a pure L2 reduction
+        # over the post-update params -- here against the frozen theta_0 closure
+        # `drift_w0` -- so no reference batch / Jacobian.  NaN triple on
+        # non-metric updates / when disabled.  Per-update scalars.
+        if config.compute_weight_drift:
+            is_wd_step = _crossed_interval(
+                start_timestep, log_env_state.timestep, config.weight_drift_freq
+            )
+            weight_drift_metric = jax.lax.cond(
+                is_wd_step,
+                lambda _: weight_drift(ntk_params_after, drift_w0, labels),
+                lambda _: nan_weight_drift(),
+                operand=None,
+            )
+        else:
+            weight_drift_metric = nan_weight_drift()
+
         # Collect a scalar reward summary for this iteration (mean reward over rollout)
         rewards = traj_batch.reward
         pos = traj_batch.info["pos"]
@@ -1378,6 +1412,7 @@ def experiment(rng, config: TrainConfig):
             biome_rank,
             ntk_metrics,
             weight_norm_metric,
+            weight_drift_metric,
         )
 
     # Run training loop with lax.scan (collect per-iteration rewards)
@@ -1404,6 +1439,7 @@ def experiment(rng, config: TrainConfig):
         biome_rank,
         ntk_metrics,
         weight_norm_metric,
+        weight_drift_metric,
     ) = info
     rewards = rewards.reshape((-1))
     pos = pos.reshape((-1, pos.shape[-1]))
@@ -1425,6 +1461,7 @@ def experiment(rng, config: TrainConfig):
         policy_ntk_cond,
         policy_churn,
     ) = ntk_metrics
+    weight_drift_pi, weight_drift_vf, weight_drift_total = weight_drift_metric
     env_step_state = last_carry.carry[0]
     frames = env_step_state[2].frames
     return (
@@ -1444,6 +1481,7 @@ def experiment(rng, config: TrainConfig):
             policy_churn,
         ),
         weight_norm_metric,
+        (weight_drift_pi, weight_drift_vf, weight_drift_total),
         frames,
     )
 
@@ -1556,6 +1594,13 @@ def main():
         # experiment.weight_norm_freq (env steps, rounded up to rollout_steps).
         weight_norm_freq = int(hypers.get("experiment", {}).get("weight_norm_freq", 0))
         compute_weight_norm = weight_norm_freq > 0
+        # Weight drift (||theta - theta_0||): independent of the NTK / weight-norm
+        # metrics, controlled by its own experiment.weight_drift_freq (env steps,
+        # rounded up to rollout_steps).
+        weight_drift_freq = int(
+            hypers.get("experiment", {}).get("weight_drift_freq", 0)
+        )
+        compute_weight_drift = weight_drift_freq > 0
         activation = str(
             hypers.get("representation", {}).get("activation", "tanh")
         ).lower()
@@ -1666,6 +1711,8 @@ def main():
             n_ref=n_ref,
             compute_weight_norm=compute_weight_norm,
             weight_norm_freq=max(weight_norm_freq, 1),
+            compute_weight_drift=compute_weight_drift,
+            weight_drift_freq=max(weight_drift_freq, 1),
         )
         configs.append(config)
 
@@ -1690,6 +1737,7 @@ def main():
             policy_churn,
         ),
         weight_norm_metric,
+        (weight_drift_pi, weight_drift_vf, weight_drift_total),
         frames,
     ) = results
 
@@ -1722,6 +1770,9 @@ def main():
         run_policy_ntk_cond = policy_ntk_cond[i]
         run_policy_churn = policy_churn[i]
         run_weight_norm = weight_norm_metric[i]
+        run_weight_drift_pi = weight_drift_pi[i]
+        run_weight_drift_vf = weight_drift_vf[i]
+        run_weight_drift_total = weight_drift_total[i]
         run_frames = frames[i]
         start_time = time.time()
         # for reward in run_rewards:
@@ -1773,6 +1824,9 @@ def main():
             policy_ntk_cond=run_policy_ntk_cond,
             policy_churn=run_policy_churn,
             weight_norm=run_weight_norm,
+            weight_drift_pi=run_weight_drift_pi,
+            weight_drift_vf=run_weight_drift_vf,
+            weight_drift_total=run_weight_drift_total,
         )
         total_numpy_time += time.time() - start_time
 

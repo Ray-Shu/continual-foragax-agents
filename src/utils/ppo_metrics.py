@@ -25,14 +25,6 @@ Two heads are measured separately:
 For each head we report the NTK Gram-matrix rank and condition number, plus the
 per-update *churn*: the norm of the change in the head's predictions on a fixed
 reference batch from immediately before to immediately after one PPO update.
-
-Separately -- on its own cadence and config flag, *not* bundled with the NTK /
-churn metrics above -- we report a single global **weight norm**: the L2 norm of
-*all* network parameters (shared torso + both heads) after the update.  It needs
-neither the reference batch nor a Jacobian, so it is essentially free and is
-gated independently (see ``weight_norm`` / ``nan_weight_norm`` and the
-``weight_norm_freq`` config in ``rtu_ppo.py``).  A growing weight norm is a
-common plasticity-loss signature.
 """
 
 from typing import Any, Callable, Tuple
@@ -94,6 +86,41 @@ def weight_norm(params: Any) -> jnp.ndarray:
 def nan_weight_norm() -> jnp.ndarray:
     """The ``NaN`` weight-norm scalar emitted on non-metric / disabled updates."""
     return jnp.float32(jnp.nan)
+
+
+def weight_drift(
+    params: Any, init_params: Any, labels: Any
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """L2 distance ``||theta - theta_0||`` between current and initial params.
+
+    The drift is reported split by the actor and critic
+    trunks -- which in this RTU-PPO architecture share no weights and are trained
+    by different objectives -- plus a global total over every leaf.
+
+    Args:
+        params: Current (post-update) parameters.
+        init_params: The frozen theta_0 snapshot taken right after init.
+        labels: Per-leaf label tree ("pi" / "vf" / ...), same structure
+            as params.
+
+    Returns:
+        (drift_pi, drift_vf, drift_total) as scalar arrays.
+    """
+    sqdiff = jax.tree_util.tree_map(
+        lambda p, p0: jnp.sum(jnp.square(p - p0)), params, init_params
+    )
+    sq_leaves = jax.tree_util.tree_leaves(sqdiff)
+    lbl_leaves = jax.tree_util.tree_leaves(labels)
+    pi_sq = sum((s for s, l in zip(sq_leaves, lbl_leaves) if l == "pi"), 0.0)
+    vf_sq = sum((s for s, l in zip(sq_leaves, lbl_leaves) if l == "vf"), 0.0)
+    total_sq = sum(sq_leaves, 0.0)
+    return jnp.sqrt(pi_sq), jnp.sqrt(vf_sq), jnp.sqrt(total_sq)
+
+
+def nan_weight_drift() -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """The ``NaN`` weight-drift triple emitted on non-metric / disabled updates."""
+    nan = jnp.float32(jnp.nan)
+    return nan, nan, nan
 
 
 def _ntk_rank_cond(jac_flat: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -232,16 +259,26 @@ def compute_ppo_metrics(
 
     if compute_value:
         v_rank, v_cond, v_churn = value_metrics(
-            apply_fn, params_before, params_after, init_hstate,
-            x_ref, action_dim, reward_dim,
+            apply_fn,
+            params_before,
+            params_after,
+            init_hstate,
+            x_ref,
+            action_dim,
+            reward_dim,
         )
     else:
         v_rank, v_cond, v_churn = nan, nan, nan
 
     if compute_policy:
         p_rank, p_cond, p_churn = policy_metrics(
-            apply_fn, params_before, params_after, init_hstate,
-            x_ref, action_dim, reward_dim,
+            apply_fn,
+            params_before,
+            params_after,
+            init_hstate,
+            x_ref,
+            action_dim,
+            reward_dim,
         )
     else:
         p_rank, p_cond, p_churn = nan, nan, nan
