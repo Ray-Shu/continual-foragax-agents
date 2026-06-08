@@ -1,12 +1,11 @@
 # Modified from esraaelelimy/continuing_ppo
+import distrax
 import flax.linen as nn
-from typing import Optional, Tuple, Union, Any, Sequence, Dict
-from flax.linen.initializers import constant, orthogonal
 import jax.numpy as jnp
 import numpy as np
-import distrax
-import functools
-from algorithms.nn.rtus.rtus import *
+from flax.linen.initializers import constant, orthogonal
+
+from algorithms.nn.activations import get_activation
 
 
 class ActorCriticMLP(nn.Module):
@@ -25,10 +24,7 @@ class ActorCriticMLP(nn.Module):
         hidden: Any
         obs: ((batch_size, obs_dim), (batch_size, action_dim), (batch_size, 1))
         """
-        if self.activation == "relu":
-            activation = nn.relu
-        else:
-            activation = nn.tanh
+        activation = get_activation(self.activation)
 
         (obs, last_action_encoded, last_reward, sine, cosine, reward_trace) = obs
         last_reward_plus = last_reward

@@ -3,13 +3,11 @@
 # Ensure third-party libraries that expect older JAX internals can import.
 # This sets a small compatibility alias if needed before importing distrax/tfp.
 import argparse
-import utils.jax_compat  # noqa: F401
-import socket
-import time
 import logging
 import os
+import socket
 import sys
-import zlib
+import time
 from collections.abc import Mapping
 from functools import partial
 from typing import Any, Callable, NamedTuple, Tuple
@@ -30,6 +28,7 @@ from ml_instrumentation.Sampler import Ignore, MovingAverage, Subsample
 from ml_instrumentation.utils import Pipe
 from PyExpUtils.results.tools import getParamsAsDict
 
+import utils.jax_compat  # noqa: F401
 from algorithms.nn.ACConv import ActorCriticConv
 from algorithms.nn.ACMLP import ActorCriticMLP
 from algorithms.nn.RealTimeACConv import RealTimeActorCriticConv
@@ -55,11 +54,6 @@ sys.path.insert(0, os.path.abspath("/tmp/src"))
 from foragax.registry import make
 
 PERIOD = 182500
-
-
-def _keypath_crc32(path) -> int:
-    path_str = "/".join(str(getattr(entry, "key", entry)) for entry in path)
-    return zlib.crc32(path_str.encode("utf-8"))
 
 
 def parse_indices(index_specs: list[str], total: int | None = None) -> list[int]:
@@ -103,6 +97,7 @@ class TrainConfig:
     # ---- STATIC (uniform across vmapped runs) ----
     d_hidden: int = struct.field(pytree_node=False)
     hidden_size: int = struct.field(pytree_node=False)
+    activation: str = struct.field(pytree_node=False)
     agent_type: str = struct.field(pytree_node=False)
     rollout_steps: int = struct.field(pytree_node=False)
     epochs: int = struct.field(pytree_node=False)
@@ -163,6 +158,7 @@ class TrainConfig:
     sp_interval: int = -1
     shrink_factor: float = 1.0
     noise_scale: float = 0.0
+
 
 class GymnaxEnvState(struct.PyTreeNode):
     to_render: bool = struct.field(pytree_node=True)
@@ -242,9 +238,20 @@ def calculate_average_reward_gae(traj_batch, last_val, gamma, gae_lambda):
 
 @partial(jax.jit, static_argnums=(1, 9, 12))
 def loss_fn(
-    params, agent_fn, traj_batch, gae, targets, init_hstate, clip_eps, vf_coef, ent_coef,
-    use_l2_init=False, initial_params=None, l2_init_multipliers=None,
-    use_spectral_reg=False, spectral_reg_multipliers=None,
+    params,
+    agent_fn,
+    traj_batch,
+    gae,
+    targets,
+    init_hstate,
+    clip_eps,
+    vf_coef,
+    ent_coef,
+    use_l2_init=False,
+    initial_params=None,
+    l2_init_multipliers=None,
+    use_spectral_reg=False,
+    spectral_reg_multipliers=None,
 ):
     rnn_in = traj_batch.obs
     _, pi, value = agent_fn(params, init_hstate, rnn_in)
@@ -278,7 +285,9 @@ def loss_fn(
         # optax.l2_loss(a, b) = 0.5 * (a - b)^2 per element
         l2_init_loss = jax.tree_util.tree_map(
             lambda m, p, p0: m * optax.l2_loss(p, p0).sum(),
-            l2_init_multipliers, params, initial_params,
+            l2_init_multipliers,
+            params,
+            initial_params,
         )
         total_loss = total_loss + jax.tree_util.tree_reduce(
             lambda a, b: a + b, l2_init_loss
@@ -308,12 +317,14 @@ def loss_fn(
             """Estimate σ₁(w_2d) via power iteration (1 step by default)."""
             u = jnp.ones((w_2d.shape[0],), dtype=w_2d.dtype)
             u = u / (jnp.linalg.norm(u) + 1e-12)
+
             def _step(u, _):
                 v = w_2d.T @ u
                 v = v / (jnp.linalg.norm(v) + 1e-12)
                 u_new = w_2d @ v
                 u_new = u_new / (jnp.linalg.norm(u_new) + 1e-12)
                 return u_new, v
+
             u, vs = jax.lax.scan(_step, u, None, length=num_iters)
             v = vs[-1]
             sigma = u @ w_2d @ v
@@ -346,19 +357,21 @@ def loss_fn(
                 d_out = param.shape[-1]
                 w_2d = jnp.transpose(param, (3, 0, 1, 2)).reshape((d_out, -1))
                 sigma = _power_iteration_sigma1(w_2d)
-                return multiplier * jnp.square(sigma ** _SR_K - 1.0)
+                return multiplier * jnp.square(sigma**_SR_K - 1.0)
 
             # --- Dense / multiplicative weight matrices (2-D) ---
             # Paper: (σ₁(W)^k − 1)²
             if param.ndim == 2:
                 sigma = _power_iteration_sigma1(param)
-                return multiplier * jnp.square(sigma ** _SR_K - 1.0)
+                return multiplier * jnp.square(sigma**_SR_K - 1.0)
 
             # Anything else (scalars, etc.) – skip
             return jnp.zeros((), dtype=param.dtype)
 
         spectral_losses = jax.tree_util.tree_map_with_path(
-            _spectral_leaf, spectral_reg_multipliers, params,
+            _spectral_leaf,
+            spectral_reg_multipliers,
+            params,
         )
         total_loss = total_loss + jax.tree_util.tree_reduce(
             lambda a, b: a + b, spectral_losses
@@ -491,7 +504,13 @@ def env_step(runner_state, _):
 
 @jax.jit
 def update_minbatch(carry_in, batch_info):
-    train_state, config, initial_params, l2_init_multipliers, spectral_reg_multipliers = carry_in
+    (
+        train_state,
+        config,
+        initial_params,
+        l2_init_multipliers,
+        spectral_reg_multipliers,
+    ) = carry_in
     minibatch, init_hstate = batch_info
     # minibatch: (seq_len,minibatch_size, _)
     # init_hstate: (1, d_hidden)
@@ -514,7 +533,13 @@ def update_minbatch(carry_in, batch_info):
         spectral_reg_multipliers,
     )
     train_state = train_state.apply_gradients(grads=grads)
-    return (train_state, config, initial_params, l2_init_multipliers, spectral_reg_multipliers), total_loss
+    return (
+        train_state,
+        config,
+        initial_params,
+        l2_init_multipliers,
+        spectral_reg_multipliers,
+    ), total_loss
 
 
 """
@@ -581,7 +606,13 @@ def update_epoch(update_state, unused):
     minibatches_info, rng = create_minibaches(
         config, hstate_batch, batch, rng, train_state
     )
-    carry_in = (train_state, config, initial_params, l2_init_multipliers, spectral_reg_multipliers)
+    carry_in = (
+        train_state,
+        config,
+        initial_params,
+        l2_init_multipliers,
+        spectral_reg_multipliers,
+    )
     carry_out, total_loss = jax.lax.scan(update_minbatch, carry_in, minibatches_info)
     train_state = carry_out[0]
     update_state = (
@@ -627,7 +658,9 @@ def update_step(update_state):
 def experiment(rng, config: TrainConfig):
     kwargs = dict(config.env_kwargs)
 
-    print(f"Creating env {config.env_id} with aperture size {config.aperture_size} and kwargs {kwargs}")
+    print(
+        f"Creating env {config.env_id} with aperture size {config.aperture_size} and kwargs {kwargs}"
+    )
 
     env = make(config.env_id, aperture_size=config.aperture_size, **kwargs)
 
@@ -675,6 +708,18 @@ def experiment(rng, config: TrainConfig):
     _agent_class = getAgent(config.agent_type)
     agent = _agent_class
 
+    if config.activation == "crelu" and _agent_class not in (
+        ActorCriticConv,
+        ActorCriticMLP,
+        RealTimeActorCriticConv,
+        RealTimeActorCriticMLP,
+    ):
+        raise NotImplementedError(
+            "CReLU activation is currently wired for ActorCriticConv, "
+            "ActorCriticMLP, RealTimeActorCriticConv, and "
+            "RealTimeActorCriticMLP."
+        )
+
     kwargs = {}
     if config.sparsity is not None:
         kwargs["sparsity"] = config.sparsity
@@ -692,7 +737,7 @@ def experiment(rng, config: TrainConfig):
     # Create and initialize the network.
     network = agent(
         action_dim=action_dim,
-        activation="tanh",
+        activation=config.activation,
         hidden_size=config.hidden_size,
         d_hidden=config.d_hidden,
         cont=False,
@@ -727,18 +772,34 @@ def experiment(rng, config: TrainConfig):
         RealTimeActorCriticConvPooling,
         RealTimeActorCriticConvHint,
     )
+    _is_plain_conv_rtu = _agent_class is RealTimeActorCriticConv
     _is_conv_hint_rtu = _agent_class is RealTimeActorCriticConvHintRTU
-    _is_mlp_rtu = _agent_class in (RealTimeActorCriticMLP, RealTimeActorCriticMLPMulti, ActorCriticMLP)
-    if _is_conv_rtu:
-        # RTU receives hidden_size-wide embedding; action/reward/hint folded in before the Dense
-        d_input = config.hidden_size
+    _is_mlp_rtu = _agent_class in (
+        RealTimeActorCriticMLP,
+        RealTimeActorCriticMLPMulti,
+        ActorCriticMLP,
+    )
+    activation_multiplier = 2 if config.activation == "crelu" else 1
+    if _is_plain_conv_rtu:
+        # RTU receives [conv Dense(hidden_size), action, last_reward+hint, ...]
+        d_input = (
+            config.hidden_size * activation_multiplier + action_dim + hint_shape[0]
+        )
+        if config.use_sinusoidal_encoding:
+            d_input += 2
+        if config.use_reward_trace:
+            d_input += 1
+    elif _is_conv_rtu:
+        d_input = config.hidden_size * activation_multiplier
     elif _is_conv_hint_rtu:
         # No main RTU — d_input is ignored by initialize_memory, pass hint input size
         d_input = hint_dim
     elif _is_mlp_rtu:
         # RTU receives [Dense(hidden_size), action, last_reward+hint, ...]
         # hint_shape[0] = 1 + hint_dim (accounts for reward + hint)
-        d_input = config.hidden_size + action_dim + hint_shape[0]
+        d_input = (
+            config.hidden_size * activation_multiplier + action_dim + hint_shape[0]
+        )
         if config.use_sinusoidal_encoding:
             d_input += 2
         if config.use_reward_trace:
@@ -776,12 +837,22 @@ def experiment(rng, config: TrainConfig):
                 "pi": optax.chain(
                     optax.clip_by_global_norm(config.max_grad_norm),
                     optax.add_decayed_weights(config.l2_reg_pi),
-                    optax.adam(config.alpha_pi, b1=config.adam_b1_pi, b2=config.adam_b2_pi, eps=config.adam_eps_pi)
+                    optax.adam(
+                        config.alpha_pi,
+                        b1=config.adam_b1_pi,
+                        b2=config.adam_b2_pi,
+                        eps=config.adam_eps_pi,
+                    ),
                 ),
                 "vf": optax.chain(
                     optax.clip_by_global_norm(config.max_grad_norm),
                     optax.add_decayed_weights(config.l2_reg_vf),
-                    optax.adam(config.alpha_vf, b1=config.adam_b1_vf, b2=config.adam_b2_vf, eps=config.adam_eps_vf)
+                    optax.adam(
+                        config.alpha_vf,
+                        b1=config.adam_b1_vf,
+                        b2=config.adam_b2_vf,
+                        eps=config.adam_eps_vf,
+                    ),
                 ),
                 "frozen": optax.set_to_zero(),
             },
@@ -792,11 +863,21 @@ def experiment(rng, config: TrainConfig):
             {
                 "pi": optax.chain(
                     optax.add_decayed_weights(config.l2_reg_pi),
-                    optax.adam(config.alpha_pi, b1=config.adam_b1_pi, b2=config.adam_b2_pi, eps=config.adam_eps_pi)
+                    optax.adam(
+                        config.alpha_pi,
+                        b1=config.adam_b1_pi,
+                        b2=config.adam_b2_pi,
+                        eps=config.adam_eps_pi,
+                    ),
                 ),
                 "vf": optax.chain(
                     optax.add_decayed_weights(config.l2_reg_vf),
-                    optax.adam(config.alpha_vf, b1=config.adam_b1_vf, b2=config.adam_b2_vf, eps=config.adam_eps_vf)
+                    optax.adam(
+                        config.alpha_vf,
+                        b1=config.adam_b1_vf,
+                        b2=config.adam_b2_vf,
+                        eps=config.adam_eps_vf,
+                    ),
                 ),
                 "frozen": optax.set_to_zero(),
             },
@@ -819,15 +900,17 @@ def experiment(rng, config: TrainConfig):
             flat_labels = traverse_util.flatten_dict(labels, sep="/")
             lam_map = {"pi": lambda_pi, "vf": lambda_vf}
             flat_mult = {
-                k: jnp.array(lam_map.get(flat_labels[k], 0.0))
-                for k in flat_params
+                k: jnp.array(lam_map.get(flat_labels[k], 0.0)) for k in flat_params
             }
             return traverse_util.unflatten_dict(
                 {tuple(k.split("/")): v for k, v in flat_mult.items()}
             )
 
         l2_init_multipliers = _make_l2_init_multipliers(
-            network_params, labels, config.lambda_l2_init_pi, config.lambda_l2_init_vf,
+            network_params,
+            labels,
+            config.lambda_l2_init_pi,
+            config.lambda_l2_init_vf,
         )
     else:
         initial_params = None
@@ -840,21 +923,23 @@ def experiment(rng, config: TrainConfig):
     # multiplier tree is None and the compile-time guard in loss_fn skips
     # the whole block.
     if config.use_spectral_reg:
+
         def _make_spectral_reg_multipliers(params, labels, lambda_pi, lambda_vf):
             flat_params = traverse_util.flatten_dict(params, sep="/")
             flat_labels = traverse_util.flatten_dict(labels, sep="/")
             lam_map = {"pi": lambda_pi, "vf": lambda_vf}
             flat_mult = {
-                k: jnp.array(lam_map.get(flat_labels[k], 0.0))
-                for k in flat_params
+                k: jnp.array(lam_map.get(flat_labels[k], 0.0)) for k in flat_params
             }
             return traverse_util.unflatten_dict(
                 {tuple(k.split("/")): v for k, v in flat_mult.items()}
             )
 
         spectral_reg_multipliers = _make_spectral_reg_multipliers(
-            network_params, labels,
-            config.lambda_spectral_pi, config.lambda_spectral_vf,
+            network_params,
+            labels,
+            config.lambda_spectral_pi,
+            config.lambda_spectral_vf,
         )
     else:
         spectral_reg_multipliers = None
@@ -871,8 +956,7 @@ def experiment(rng, config: TrainConfig):
         # Pre-compute which leaves belong to the last layer, keyed by flattened path.
         _flat_params = traverse_util.flatten_dict(network_params, sep="/")
         _last_layer_keys = frozenset(
-            k for k in _flat_params
-            if "actor_mean" in k or "critic_value" in k
+            k for k in _flat_params if "actor_mean" in k or "critic_value" in k
         )
 
         def _is_last_layer(path_str):
@@ -901,12 +985,15 @@ def experiment(rng, config: TrainConfig):
             fresh_opt_state = tx.init(new_params)
             new_opt_state = jax.tree_util.tree_map_with_path(
                 lambda path, fresh_val, old_val: (
-                    fresh_val if any(
-                        (hasattr(k, "key") and (
-                            "actor_mean" in k.key or "critic_value" in k.key
-                        ))
+                    fresh_val
+                    if any(
+                        (
+                            hasattr(k, "key")
+                            and ("actor_mean" in k.key or "critic_value" in k.key)
+                        )
                         for k in path
-                    ) else old_val
+                    )
+                    else old_val
                 ),
                 fresh_opt_state,
                 train_state.opt_state,
@@ -921,16 +1008,20 @@ def experiment(rng, config: TrainConfig):
     # Shrink and Perturb: shrink all params towards zero and add Gaussian noise,
     # then reinitialize optimizer state.  Guarded by `config.use_shrink_and_perturb`.
     if config.use_shrink_and_perturb:
+
         def _shrink_and_perturb(train_state, rng):
             """Apply shrink-and-perturb to all network parameters."""
-            rng, noise_rng = jax.random.split(rng)
+            rng, subkey = jax.random.split(rng)
 
-            def sp(path, p):
-                leaf_rng = jax.random.fold_in(noise_rng, _keypath_crc32(path))
-                noise = jax.random.normal(leaf_rng, shape=p.shape, dtype=p.dtype)
+            leaves, treedef = jax.tree_util.tree_flatten(train_state.params)
+            leaf_keys = jax.random.split(subkey, len(leaves))
+            keys_tree = jax.tree_util.tree_unflatten(treedef, leaf_keys)
+
+            def sp(k, p):
+                noise = jax.random.normal(k, shape=p.shape, dtype=p.dtype)
                 return p * config.shrink_factor + noise * config.noise_scale
 
-            new_params = jax.tree_util.tree_map_with_path(sp, train_state.params)
+            new_params = jax.tree_util.tree_map(sp, keys_tree, train_state.params)
 
             # Reinitialize optimizer state for the perturbed parameters
             new_opt_state = tx.init(new_params)
@@ -955,9 +1046,7 @@ def experiment(rng, config: TrainConfig):
             r, st = carry
             r, a_rng, s_rng = jax.random.split(r, 3)
             ref_action = jax.random.randint(a_rng, (), 0, action_dim)
-            ref_obs, st, _, _, _ = env.step(
-                s_rng, st, ref_action, env.default_params
-            )
+            ref_obs, st, _, _, _ = env.step(s_rng, st, ref_action, env.default_params)
             ref_img = ref_obs["image"] if isinstance(ref_obs, Mapping) else ref_obs
             return (r, st), ref_img
 
@@ -981,9 +1070,18 @@ def experiment(rng, config: TrainConfig):
         init_hstate,
     )
 
-    @scan_tqdm(config.num_updates, print_rate=max(1, min(100, config.num_updates // 20)))
+    @scan_tqdm(
+        config.num_updates, print_rate=max(1, min(100, config.num_updates // 20))
+    )
     def experiment_step(carry, iteration_idx):
-        env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers = carry
+        (
+            env_step_state,
+            train_state,
+            rng,
+            initial_params,
+            l2_init_multipliers,
+            spectral_reg_multipliers,
+        ) = carry
         (
             train_state,
             gymnax_state,
@@ -1179,6 +1277,7 @@ def experiment(rng, config: TrainConfig):
         # lax.cond skips the (expensive) Jacobian work on non-metric updates;
         # disabled updates / heads report NaN.  Emitted as per-update scalars.
         if config.compute_ntk:
+
             def _do_ntk(_):
                 return compute_ppo_metrics(
                     train_state.apply_fn,
@@ -1261,7 +1360,14 @@ def experiment(rng, config: TrainConfig):
         )
 
         # Optional lightweight debug
-        carry_out = (env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers)
+        carry_out = (
+            env_step_state,
+            train_state,
+            rng,
+            initial_params,
+            l2_init_multipliers,
+            spectral_reg_multipliers,
+        )
         return carry_out, (
             rewards,
             pos,
@@ -1275,7 +1381,14 @@ def experiment(rng, config: TrainConfig):
         )
 
     # Run training loop with lax.scan (collect per-iteration rewards)
-    init_carry = (env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers)
+    init_carry = (
+        env_step_state,
+        train_state,
+        rng,
+        initial_params,
+        l2_init_multipliers,
+        spectral_reg_multipliers,
+    )
     last_carry, info = jax.lax.scan(
         experiment_step,
         PBar(id=config.id, carry=init_carry),
@@ -1441,14 +1554,18 @@ def main():
         n_ref = int(hypers.get("experiment", {}).get("x_ref_steps", 128))
         # Weight norm: independent of the NTK metrics, controlled by its own
         # experiment.weight_norm_freq (env steps, rounded up to rollout_steps).
-        weight_norm_freq = int(
-            hypers.get("experiment", {}).get("weight_norm_freq", 0)
-        )
+        weight_norm_freq = int(hypers.get("experiment", {}).get("weight_norm_freq", 0))
         compute_weight_norm = weight_norm_freq > 0
+        activation = str(
+            hypers.get("representation", {}).get("activation", "tanh")
+        ).lower()
+        if "crelu" in exp.agent.lower():
+            activation = "crelu"
         config = TrainConfig(
             d_hidden=int(hypers["representation"]["d_hidden"]),
             agent_type=exp.agent,
             hidden_size=int(hypers["representation"]["hidden"]),
+            activation=activation,
             rollout_steps=int(hypers["rollout_steps"]),
             epochs=int(hypers["epochs"]),
             num_mini_batch=int(hypers["num_mini_batch"]),
@@ -1497,7 +1614,12 @@ def main():
             sparsity=hypers["representation"].get("sparsity", None),
             spectral_radius=hypers["representation"].get("spectral_radius", None),
             use_sinusoidal_encoding=bool(hypers.get("use_sinusoidal_encoding", False)),
-            use_reward_trace=bool(hypers.get("use_reward_trace", hypers.get("representation", {}).get("use_reward_trace", False))),
+            use_reward_trace=bool(
+                hypers.get(
+                    "use_reward_trace",
+                    hypers.get("representation", {}).get("use_reward_trace", False),
+                )
+            ),
             use_hint_trace=bool("_HT" in exp.agent),
             use_layernorm=bool(
                 hypers.get(
@@ -1506,7 +1628,12 @@ def main():
                 )
             ),
             conv=str(hypers.get("representation", {}).get("conv", "Conv2D")),
-            reward_trace_decay=float(hypers.get("reward_trace_decay", 1.0)),
+            reward_trace_decay=float(
+                hypers.get(
+                    "reward_trace_decay",
+                    hypers.get("representation", {}).get("reward_trace_decay", 1.0),
+                )
+            ),
             num_updates=num_updates,
             aperture_size=int(hypers["environment"]["aperture_size"]),
             render_mode=hypers["environment"].get("render_mode", "world_reward"),

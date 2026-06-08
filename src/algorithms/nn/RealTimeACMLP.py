@@ -1,12 +1,12 @@
 # Modified from esraaelelimy/continuing_ppo
+import distrax
 import flax.linen as nn
-from typing import Optional, Tuple, Union, Any, Sequence, Dict
-from flax.linen.initializers import constant, orthogonal
 import jax.numpy as jnp
 import numpy as np
-import distrax
-import functools
-from algorithms.nn.rtus.rtus import *
+from flax.linen.initializers import constant, orthogonal
+
+from algorithms.nn.activations import get_activation
+from algorithms.nn.rtus.rtus import RTLRTUs, RTNLRTUs
 
 
 class RealTimeActorCriticMLP(nn.Module):
@@ -26,10 +26,7 @@ class RealTimeActorCriticMLP(nn.Module):
         hidden: ((batch_size, d_hidden), (batch_size, d_hidden))
         obs: ((batch_size, obs_dim), (batch_size, action_dim), (batch_size, 1))
         """
-        if self.activation == "relu":
-            activation = nn.relu
-        else:
-            activation = nn.tanh
+        activation = get_activation(self.activation)
 
         if self.rtu_type == "linear_rtu":
             seq_model = RTLRTUs
@@ -37,6 +34,11 @@ class RealTimeActorCriticMLP(nn.Module):
             seq_model = RTNLRTUs
         else:
             raise NotImplementedError
+        rtu_activation = (
+            "crelu"
+            if self.activation == "crelu" and self.rtu_type == "linear_rtu"
+            else "relu"
+        )
 
         (actor_hidden, critic_hidden) = hidden
 
@@ -81,8 +83,18 @@ class RealTimeActorCriticMLP(nn.Module):
         )
         critic_embedding_skip = critic_embedding
 
-        actor_hidden, actor_embedding = seq_model(self.d_hidden, params_type="exp_exp", name="actor_rtu")(actor_hidden, actor_embedding)
-        critic_hidden, critic_embedding = seq_model(self.d_hidden, params_type="exp_exp", name="critic_rtu")(critic_hidden, critic_embedding)
+        actor_hidden, actor_embedding = seq_model(
+            self.d_hidden,
+            params_type="exp_exp",
+            activation=rtu_activation,
+            name="actor_rtu",
+        )(actor_hidden, actor_embedding)
+        critic_hidden, critic_embedding = seq_model(
+            self.d_hidden,
+            params_type="exp_exp",
+            activation=rtu_activation,
+            name="critic_rtu",
+        )(critic_hidden, critic_embedding)
         actor_embedding = jnp.concatenate((actor_embedding, actor_embedding_skip), axis=-1)
         critic_embedding = jnp.concatenate((critic_embedding, critic_embedding_skip), axis=-1)
 

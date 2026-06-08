@@ -242,24 +242,31 @@ class PT_DQN(DQN):
         return replace(state, pm_buffer_state=new_pm)
 
     # ------------------------------------------
-    # -- Override _step/_end for PM buffer add --
+    # -- Override _step_impl/_end_impl for PM buffer add --
     # ------------------------------------------
-    @partial(jax.jit, static_argnums=0)
-    def _step(
+    @partial(jax.jit, static_argnums=(0, 5))
+    def _step_impl(
         self,
         state: AgentState,
         reward: jax.Array,
         obs: Union[jax.Array, Dict[str, jax.Array]],
         extra: Dict[str, jax.Array],
+        update: bool,
     ):
         # Add (s, a, Q_P(s,a)) to PM buffer before main buffer add + update
         state = self._add_to_pm_buffer(state)
-        return super()._step(state, reward, obs, extra)
+        return super()._step_impl(state, reward, obs, extra, update)
 
-    @partial(jax.jit, static_argnums=0)
-    def _end(self, state: AgentState, reward: jax.Array, extra: Dict[str, jax.Array]):
+    @partial(jax.jit, static_argnums=(0, 4))
+    def _end_impl(
+        self,
+        state: AgentState,
+        reward: jax.Array,
+        extra: Dict[str, jax.Array],
+        update: bool,
+    ):
         state = self._add_to_pm_buffer(state)
-        return super()._end(state, reward, extra)
+        return super()._end_impl(state, reward, extra, update)
 
     # ---------------------------
     # -- Update logic          --

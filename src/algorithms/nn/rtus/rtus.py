@@ -1,12 +1,11 @@
 # From esraaelelimy/continuing_ppo
 from flax import linen as nn
-import jax
 import jax.numpy as jnp
-import flax
-from typing import Callable, Any, Tuple, Iterable, Optional
-from algorithms.nn.rtus.rtus_utils import *
-from algorithms.nn.rtus.linear_rtus import *
-from algorithms.nn.rtus.non_linear_rtus import *
+from typing import Any, Tuple
+
+from algorithms.nn.rtus.linear_rtus import LinearRTUs, RealTimeLinearRTUs
+from algorithms.nn.rtus.non_linear_rtus import NonLinearRTUs, RealTimeNonLinearRTUs
+from algorithms.nn.rtus.rtus_utils import act_options
 
 
 PRNGKey = Any
@@ -97,7 +96,7 @@ class BPTTNonLRTUs(nn.Module):
 
 """
 A Consice interface to Real-Time Linear RTUs
-Linear recurrence + non-linear output 
+Linear recurrence + non-linear output
 """
 
 
