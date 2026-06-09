@@ -1,12 +1,10 @@
 # Modified from esraaelelimy/continuing_ppo
 import flax.linen as nn
-from typing import Optional, Tuple, Union, Any, Sequence, Dict
 from flax.linen.initializers import constant, orthogonal
 import jax.numpy as jnp
 import numpy as np
 import distrax
-import functools
-from algorithms.nn.rtus.rtus import *
+from algorithms.nn.rtus.rtus import RTLRTUs, RTNLRTUs
 
 
 class RealTimeActorCriticMLP(nn.Module):
@@ -61,6 +59,9 @@ class RealTimeActorCriticMLP(nn.Module):
         )(obs)
         if self.use_layernorm:
             actor_embedding = nn.LayerNorm(name="actor_layernorm1")(actor_embedding)
+        # Sow pre-tanh activations for the plasticity-metric probe.
+        # No-op unless apply() is called with mutable=['intermediates'].
+        self.sow("intermediates", "actor_pre1", actor_embedding)
         actor_embedding = activation(actor_embedding)
         actor_embedding = jnp.concatenate(
             (actor_embedding, last_action_encoded, last_reward_plus), axis=-1
@@ -75,6 +76,7 @@ class RealTimeActorCriticMLP(nn.Module):
         )(obs)
         if self.use_layernorm:
             critic_embedding = nn.LayerNorm(name="critic_layernorm1")(critic_embedding)
+        self.sow("intermediates", "critic_pre1", critic_embedding)
         critic_embedding = activation(critic_embedding)
         critic_embedding = jnp.concatenate(
             (critic_embedding, last_action_encoded, last_reward_plus), axis=-1
@@ -83,12 +85,24 @@ class RealTimeActorCriticMLP(nn.Module):
 
         actor_hidden, actor_embedding = seq_model(self.d_hidden, params_type="exp_exp", name="actor_rtu")(actor_hidden, actor_embedding)
         critic_hidden, critic_embedding = seq_model(self.d_hidden, params_type="exp_exp", name="critic_rtu")(critic_hidden, critic_embedding)
+        # RTU output is post-nonlinearity: RTLRTUs/RTNLRTUs apply
+        # `act_options[self.activation]` to the concatenated recurrent state
+        # at the end of __call__, and we instantiate them without an
+        # `activation=` override so they use the class default ("relu").
+        # Effective rank measures how many independent recurrent feature
+        # dimensions are in use; Sokar τ-dormancy applies here in its
+        # original sense because the signal is post-ReLU. The "_out" suffix
+        # avoids colliding with the "actor_rtu"/"critic_rtu" submodule names
+        # flax uses for scope tracking.
+        self.sow("intermediates", "actor_rtu_out", actor_embedding)
+        self.sow("intermediates", "critic_rtu_out", critic_embedding)
         actor_embedding = jnp.concatenate((actor_embedding, actor_embedding_skip), axis=-1)
         critic_embedding = jnp.concatenate((critic_embedding, critic_embedding_skip), axis=-1)
 
         actor_mean = nn.Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0), name="actor_dense2")(actor_embedding)
         if self.use_layernorm:
             actor_mean = nn.LayerNorm(epsilon=1e-05, name="actor_layernorm2")(actor_mean)
+        self.sow("intermediates", "actor_pre2", actor_mean)
         actor_mean = activation(actor_mean)
         actor_mean = nn.Dense(
             self.action_dim,
@@ -113,6 +127,7 @@ class RealTimeActorCriticMLP(nn.Module):
         )(critic_embedding)
         if self.use_layernorm:
             critic = nn.LayerNorm(name="critic_layernorm2")(critic)
+        self.sow("intermediates", "critic_pre2", critic)
         critic = activation(critic)
         critic = nn.Dense(
             1, kernel_init=orthogonal(1.0), bias_init=constant(0.0), name="critic_value"

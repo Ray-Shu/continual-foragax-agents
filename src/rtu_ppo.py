@@ -174,13 +174,87 @@ class Transition(NamedTuple):
     value: jnp.ndarray  # v(o_t)
     reward: jnp.ndarray  # r[t+1]
     log_prob: jnp.ndarray
-    obs: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]  # o_t, a_{t-1}, r_{t-1}
+    obs: Tuple[jnp.ndarray, ...]  # variable-length: (o_t, a_{t-1}, r_{t-1}, ...)
     info: jnp.ndarray
 
 
 class Interaction(NamedTuple):
     a: int
     r: bool
+
+
+# ----------------------------------------------------------------------------
+# -- Plasticity metric helpers --
+#
+# Activation-aware probes captured during a rollout via Flax `sow` calls in
+# RealTimeACMLP. Probe sites and metrics:
+#   actor/critic_pre1, actor/critic_pre2  (pre-tanh)  → effective rank +
+#       saturation rate  E[ 1{|tanh(z)| > 0.95} ]  (tanh-aware analogue of
+#       Sokar dormancy; tanh's failure mode is saturation, not zeroing).
+#   actor/critic_rtu_out  (post-ReLU)  → effective rank + Sokar τ-dormant
+#       fraction with τ = 0.025 (the regime Sokar 2023 was designed for).
+# Expectations are estimated as sample means over the rollout's collapsed
+# (T·B, H) activation matrix — Monte Carlo for E_{x∼D_rollout}.
+# ----------------------------------------------------------------------------
+def _effective_rank(activation):
+    h = activation.reshape(-1, activation.shape[-1]).astype(jnp.float32)
+    h = h - jnp.mean(h, axis=0, keepdims=True)
+    s = jnp.linalg.svd(h, compute_uv=False)
+    p = s / (jnp.sum(s) + 1e-9)
+    entropy = -jnp.sum(p * jnp.log(p + 1e-9))
+    return jnp.exp(entropy)
+
+
+def _dormant_fraction(activation, threshold=0.025):
+    h = activation.reshape(-1, activation.shape[-1])
+    mean_act = jnp.mean(jnp.abs(h), axis=0)
+    score = mean_act / (jnp.mean(mean_act) + 1e-9)
+    return jnp.mean(score <= threshold).astype(jnp.float32)
+
+
+def _saturation_rate(pre_activation, threshold=0.95):
+    # Assumes a tanh nonlinearity follows this probe site.
+    h = pre_activation.reshape(-1, pre_activation.shape[-1])
+    return jnp.mean(jnp.abs(jnp.tanh(h)) > threshold).astype(jnp.float32)
+
+
+def _compute_plasticity_metrics(params, apply_fn, init_hstate, traj_obs):
+    """One extra forward pass over the rollout with intermediates captured.
+
+    Returns 12 scalars in this order:
+      6 effective ranks (actor/critic × pre1, rtu, pre2),
+      4 saturation rates at the tanh sites (actor/critic × pre1, pre2),
+      2 Sokar dormant fractions at the post-ReLU RTU outputs (actor/critic).
+    """
+    _, state = apply_fn(
+        params, init_hstate, traj_obs, mutable=["intermediates"]
+    )
+    inter = state["intermediates"]
+    a_pre1 = inter["actor_pre1"][0]
+    c_pre1 = inter["critic_pre1"][0]
+    a_rtu = inter["actor_rtu_out"][0]
+    c_rtu = inter["critic_rtu_out"][0]
+    a_pre2 = inter["actor_pre2"][0]
+    c_pre2 = inter["critic_pre2"][0]
+    return (
+        _effective_rank(a_pre1),
+        _effective_rank(c_pre1),
+        _effective_rank(a_rtu),
+        _effective_rank(c_rtu),
+        _effective_rank(a_pre2),
+        _effective_rank(c_pre2),
+        _saturation_rate(a_pre1),
+        _saturation_rate(c_pre1),
+        _saturation_rate(a_pre2),
+        _saturation_rate(c_pre2),
+        _dormant_fraction(a_rtu),
+        _dormant_fraction(c_rtu),
+    )
+
+
+def _zero_plasticity_metrics():
+    z = jnp.float32(0.0)
+    return (z, z, z, z, z, z, z, z, z, z, z, z)
 
 
 @jax.jit
@@ -676,16 +750,18 @@ def experiment(rng, config: TrainConfig):
     ):
         kwargs["conv"] = config.conv
 
-    # Create and initialize the network.
+    # Create and initialize the network. `agent` is dynamically dispatched via
+    # getAgent(config.agent_type); pyright sees only the base type so it can't
+    # verify variant-specific kwargs like use_layernorm.
     network = agent(
         action_dim=action_dim,
         activation="tanh",
         hidden_size=config.hidden_size,
         d_hidden=config.d_hidden,
         cont=False,
-        use_sinusoidal_encoding=config.use_sinusoidal_encoding,
-        use_reward_trace=config.use_reward_trace,
-        use_layernorm=config.use_layernorm,
+        use_sinusoidal_encoding=config.use_sinusoidal_encoding,  # pyright: ignore[reportCallIssue]
+        use_reward_trace=config.use_reward_trace,  # pyright: ignore[reportCallIssue]
+        use_layernorm=config.use_layernorm,  # pyright: ignore[reportCallIssue]
         **kwargs,
     )
 
@@ -806,7 +882,7 @@ def experiment(rng, config: TrainConfig):
             flat_labels = traverse_util.flatten_dict(labels, sep="/")
             lam_map = {"pi": lambda_pi, "vf": lambda_vf}
             flat_mult = {
-                k: jnp.array(lam_map.get(flat_labels[k], 0.0))
+                k: jnp.array(lam_map.get(str(flat_labels[k]), 0.0))
                 for k in flat_params
             }
             return traverse_util.unflatten_dict(
@@ -832,7 +908,7 @@ def experiment(rng, config: TrainConfig):
             flat_labels = traverse_util.flatten_dict(labels, sep="/")
             lam_map = {"pi": lambda_pi, "vf": lambda_vf}
             flat_mult = {
-                k: jnp.array(lam_map.get(flat_labels[k], 0.0))
+                k: jnp.array(lam_map.get(str(flat_labels[k]), 0.0))
                 for k in flat_params
             }
             return traverse_util.unflatten_dict(
@@ -1054,6 +1130,19 @@ def experiment(rng, config: TrainConfig):
             traj_batch, last_val, config.gamma, config.gae_lambda
         )
 
+        # Plasticity-metric forward pass on the just-completed rollout.
+        # Uses pre-update params and the rollout's actual init hidden state
+        # (`hstate`, the carry from the previous iteration), so the captured
+        # activations match what the rollout actually saw. Guarded statically
+        # on agent_type — only RealTimeActorCriticMLP has the sow calls
+        # wired up; other variants emit zeros.
+        if config.agent_type == "RealTimeActorCriticMLP":
+            plasticity = _compute_plasticity_metrics(
+                train_state.params, train_state.apply_fn, hstate, traj_batch.obs
+            )
+        else:
+            plasticity = _zero_plasticity_metrics()
+
         # Conditionally perform the update based on how many env steps have elapsed.
         # If freeze_steps <= 0, updates are always performed.
         # Otherwise, once log_env_state.timestep exceeds freeze_steps, we stop updating.
@@ -1177,6 +1266,7 @@ def experiment(rng, config: TrainConfig):
             object_collected_id,
             biome_regret,
             biome_rank,
+            plasticity,
         )
 
     # Run training loop with lax.scan (collect per-iteration rewards)
@@ -1186,9 +1276,8 @@ def experiment(rng, config: TrainConfig):
         PBar(id=config.id, carry=init_carry),
         xs=jnp.arange(int(config.num_updates)),
     )
-    rewards, pos, loss_info, biome_id, object_collected_id, biome_regret, biome_rank = (
-        info
-    )
+    (rewards, pos, loss_info, biome_id, object_collected_id,
+     biome_regret, biome_rank, plasticity) = info
     rewards = rewards.reshape((-1))
     pos = pos.reshape((-1, pos.shape[-1]))
     total_loss = jnp.mean(loss_info[0], axis=(-1, -2))
@@ -1199,6 +1288,7 @@ def experiment(rng, config: TrainConfig):
     object_collected_id = object_collected_id.reshape((-1))
     biome_regret = biome_regret.reshape((-1))
     biome_rank = biome_rank.reshape((-1))
+    # plasticity is a tuple of 10 arrays of shape (num_updates,). Keep as-is.
     env_step_state = last_carry.carry[0]
     frames = env_step_state[2].frames
     return (
@@ -1209,6 +1299,7 @@ def experiment(rng, config: TrainConfig):
         object_collected_id,
         biome_regret,
         biome_rank,
+        plasticity,
         frames,
     )
 
@@ -1414,8 +1505,17 @@ def main():
         object_collected_id,
         biome_regret,
         biome_rank,
+        plasticity,
         frames,
     ) = results
+    # Unpack plasticity into named arrays for saving. Order must match
+    # _compute_plasticity_metrics in this file.
+    (eff_rank_actor_pre1, eff_rank_critic_pre1,
+     eff_rank_actor_rtu,  eff_rank_critic_rtu,
+     eff_rank_actor_pre2, eff_rank_critic_pre2,
+     sat_rate_actor_pre1, sat_rate_critic_pre1,
+     sat_rate_actor_pre2, sat_rate_critic_pre2,
+     dormant_actor_rtu,   dormant_critic_rtu) = plasticity
 
     # --------------------
     # -- Saving --
@@ -1439,6 +1539,18 @@ def main():
         run_object_collected_id = object_collected_id[i]
         run_biome_regret = biome_regret[i]
         run_biome_rank = biome_rank[i]
+        run_eff_rank_actor_pre1 = eff_rank_actor_pre1[i]
+        run_eff_rank_critic_pre1 = eff_rank_critic_pre1[i]
+        run_eff_rank_actor_rtu = eff_rank_actor_rtu[i]
+        run_eff_rank_critic_rtu = eff_rank_critic_rtu[i]
+        run_eff_rank_actor_pre2 = eff_rank_actor_pre2[i]
+        run_eff_rank_critic_pre2 = eff_rank_critic_pre2[i]
+        run_sat_rate_actor_pre1 = sat_rate_actor_pre1[i]
+        run_sat_rate_critic_pre1 = sat_rate_critic_pre1[i]
+        run_sat_rate_actor_pre2 = sat_rate_actor_pre2[i]
+        run_sat_rate_critic_pre2 = sat_rate_critic_pre2[i]
+        run_dormant_actor_rtu = dormant_actor_rtu[i]
+        run_dormant_critic_rtu = dormant_critic_rtu[i]
         run_frames = frames[i]
         start_time = time.time()
         # for reward in run_rewards:
@@ -1483,6 +1595,18 @@ def main():
             object_collected_id=run_object_collected_id,
             biome_regret=run_biome_regret,
             biome_rank=run_biome_rank,
+            eff_rank_actor_pre1=run_eff_rank_actor_pre1,
+            eff_rank_critic_pre1=run_eff_rank_critic_pre1,
+            eff_rank_actor_rtu=run_eff_rank_actor_rtu,
+            eff_rank_critic_rtu=run_eff_rank_critic_rtu,
+            eff_rank_actor_pre2=run_eff_rank_actor_pre2,
+            eff_rank_critic_pre2=run_eff_rank_critic_pre2,
+            sat_rate_actor_pre1=run_sat_rate_actor_pre1,
+            sat_rate_critic_pre1=run_sat_rate_critic_pre1,
+            sat_rate_actor_pre2=run_sat_rate_actor_pre2,
+            sat_rate_critic_pre2=run_sat_rate_critic_pre2,
+            dormant_actor_rtu=run_dormant_actor_rtu,
+            dormant_critic_rtu=run_dormant_critic_rtu,
         )
         total_numpy_time += time.time() - start_time
 
