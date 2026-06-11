@@ -257,6 +257,70 @@ def _zero_plasticity_metrics():
     return (z, z, z, z, z, z, z, z, z, z, z, z)
 
 
+# ----------------------------------------------------------------------------
+# -- Gradient-norm helpers --
+#
+# Per-layer l0 / l1 / l2 norms of the raw (pre-clip) gradient, computed each
+# minibatch update and averaged over a rollout. Each top-level Flax module is
+# one "layer" (the whole RTU is lumped); LayerNorm modules are excluded. l0 is
+# the count of entries with |g| > eps (1e-8) — meaningful at the post-ReLU RTU
+# site, ~flat for tanh layers (tanh' is never exactly 0), so l1/l2 carry the
+# plasticity signal there. Param-count weighting across layers is done offline.
+# ----------------------------------------------------------------------------
+_GRAD_NORM_EPS = 1e-8
+
+
+def _grad_layer_name(path):
+    parts = list(path)
+    if parts and parts[0] == "params":
+        parts = parts[1:]
+    return parts[0] if parts else ""
+
+
+def _grad_layer_buckets(tree):
+    """Map each non-LayerNorm leaf to its top-level module ('actor_dense1',
+    'actor_rtu', ...), lumping the whole RTU together. Returns {layer: [leaves]}."""
+    flat = traverse_util.flatten_dict(tree)
+    buckets = {}
+    for path, arr in flat.items():
+        layer = _grad_layer_name(path)
+        if not layer or "layernorm" in layer.lower():
+            continue
+        buckets.setdefault(layer, []).append(arr)
+    return buckets
+
+
+def _per_layer_grad_norms(grads, eps=_GRAD_NORM_EPS):
+    """Per-layer (l0, l1, l2) norms of the raw gradient. Returns {layer: (l0, l1, l2)}."""
+    buckets = _grad_layer_buckets(grads)
+    norms = {}
+    for layer in sorted(buckets):
+        v = jnp.concatenate([a.reshape(-1) for a in buckets[layer]])
+        absv = jnp.abs(v)
+        norms[layer] = (
+            jnp.sum(absv > eps).astype(jnp.float32),  # l0
+            jnp.sum(absv),                            # l1
+            jnp.sqrt(jnp.sum(v * v)),                 # l2
+        )
+    return norms
+
+
+def _zero_grad_norms(params, epochs, num_mini_batch):
+    """Zero grad-norm tree matching the scanned (epochs, num_mini_batch) shape,
+    for the frozen branch of the update cond."""
+    z = jnp.zeros((epochs, num_mini_batch), dtype=jnp.float32)
+    return {layer: (z, z, z) for layer in sorted(_grad_layer_buckets(params))}
+
+
+def _grad_layer_param_counts(params):
+    """Static per-layer parameter counts for offline param-count weighting."""
+    buckets = _grad_layer_buckets(params)
+    return {
+        layer: jnp.float32(sum(int(a.size) for a in buckets[layer]))
+        for layer in sorted(buckets)
+    }
+
+
 @jax.jit
 def calculate_gae(traj_batch, last_val, gamma, gae_lambda):
     def _get_advantages(carry, transition):
@@ -574,8 +638,11 @@ def update_minbatch(carry_in, batch_info):
         config.use_spectral_reg,
         spectral_reg_multipliers,
     )
+    # Per-layer grad norms on the RAW (pre-clip) gradient, before the optimizer
+    # chain's clip_by_global_norm would cap l2 at max_grad_norm.
+    grad_norms = _per_layer_grad_norms(grads)
     train_state = train_state.apply_gradients(grads=grads)
-    return (train_state, config, initial_params, l2_init_multipliers, spectral_reg_multipliers), total_loss
+    return (train_state, config, initial_params, l2_init_multipliers, spectral_reg_multipliers), (total_loss, grad_norms)
 
 
 """
@@ -643,7 +710,7 @@ def update_epoch(update_state, unused):
         config, hstate_batch, batch, rng, train_state
     )
     carry_in = (train_state, config, initial_params, l2_init_multipliers, spectral_reg_multipliers)
-    carry_out, total_loss = jax.lax.scan(update_minbatch, carry_in, minibatches_info)
+    carry_out, minibatch_out = jax.lax.scan(update_minbatch, carry_in, minibatches_info)
     train_state = carry_out[0]
     update_state = (
         train_state,
@@ -658,7 +725,7 @@ def update_epoch(update_state, unused):
         l2_init_multipliers,
         spectral_reg_multipliers,
     )
-    return update_state, total_loss
+    return update_state, minibatch_out
 
 
 @jax.jit
@@ -813,6 +880,10 @@ def experiment(rng, config: TrainConfig):
     else:
         init_hstate = agent.initialize_memory(1, config.d_hidden, d_input)
     network_params = network.init(_rng, init_hstate, init_x)
+
+    # Static per-layer parameter counts for offline param-count weighting of
+    # the gradient norms.
+    grad_nparams = _grad_layer_param_counts(network_params)
 
     def make_label_tree(params):
         flat = traverse_util.flatten_dict(params, sep="/")
@@ -1176,13 +1247,16 @@ def experiment(rng, config: TrainConfig):
                 _l2_init_multipliers,
                 _spectral_reg_multipliers,
             ) = update_state
-            return (train_state, rng), _zero_loss_info(config)
+            return (train_state, rng), (
+                _zero_loss_info(config),
+                _zero_grad_norms(network_params, config.epochs, config.num_mini_batch),
+            )
 
         should_update = jnp.logical_or(
             config.freeze_steps <= 0,
             log_env_state.timestep <= config.freeze_steps,
         )
-        (train_state, rng), loss_info = jax.lax.cond(
+        (train_state, rng), (loss_info, grad_norms) = jax.lax.cond(
             should_update, update_step, skip_update, update_state
         )
 
@@ -1267,6 +1341,7 @@ def experiment(rng, config: TrainConfig):
             biome_regret,
             biome_rank,
             plasticity,
+            grad_norms,
         )
 
     # Run training loop with lax.scan (collect per-iteration rewards)
@@ -1277,13 +1352,18 @@ def experiment(rng, config: TrainConfig):
         xs=jnp.arange(int(config.num_updates)),
     )
     (rewards, pos, loss_info, biome_id, object_collected_id,
-     biome_regret, biome_rank, plasticity) = info
+     biome_regret, biome_rank, plasticity, grad_norms) = info
     rewards = rewards.reshape((-1))
     pos = pos.reshape((-1, pos.shape[-1]))
     total_loss = jnp.mean(loss_info[0], axis=(-1, -2))
     value_loss = jnp.mean(loss_info[1][0], axis=(-1, -2))
     policy_loss = jnp.mean(loss_info[1][1], axis=(-1, -2))
     entropy = jnp.mean(loss_info[1][2], axis=(-1, -2))
+    # Average each per-layer norm over the rollout's (epochs, num_mini_batch)
+    # updates -> one value per layer per norm per rollout.
+    grad_norms = jax.tree_util.tree_map(
+        lambda x: jnp.mean(x, axis=(-1, -2)), grad_norms
+    )
     biome_id = biome_id.reshape((-1))
     object_collected_id = object_collected_id.reshape((-1))
     biome_regret = biome_regret.reshape((-1))
@@ -1301,6 +1381,8 @@ def experiment(rng, config: TrainConfig):
         biome_rank,
         plasticity,
         frames,
+        grad_norms,
+        grad_nparams,
     )
 
 
@@ -1507,6 +1589,8 @@ def main():
         biome_rank,
         plasticity,
         frames,
+        grad_norms,
+        grad_nparams,
     ) = results
     # Unpack plasticity into named arrays for saving. Order must match
     # _compute_plasticity_metrics in this file.
@@ -1571,6 +1655,20 @@ def main():
         context.ensureExists(data_path, is_file=True)
         context.ensureExists(video_path, is_file=True)
 
+        # Per-layer gradient norms for this run: one time series per
+        # (norm, layer), plus the constant per-layer parameter count for
+        # offline param-count weighting.
+        run_grad_norm_kwargs = {}
+        for layer, (l0, l1, l2) in grad_norms.items():
+            run_grad_norm_kwargs[f"grad_l0_{layer}"] = l0[i]
+            run_grad_norm_kwargs[f"grad_l1_{layer}"] = l1[i]
+            run_grad_norm_kwargs[f"grad_l2_{layer}"] = l2[i]
+            # 1-d (not 0-d scalar) so the generic npz->DataFrame loader, which
+            # reads v.shape[0] on every key, doesn't choke.
+            run_grad_norm_kwargs[f"grad_nparams_{layer}"] = np.atleast_1d(
+                np.asarray(grad_nparams[layer][i])
+            )
+
         start_time = time.time()
         if config.allocate_frames:
             start_frame = (
@@ -1607,6 +1705,7 @@ def main():
             sat_rate_critic_pre2=run_sat_rate_critic_pre2,
             dormant_actor_rtu=run_dormant_actor_rtu,
             dormant_critic_rtu=run_dormant_critic_rtu,
+            **run_grad_norm_kwargs,
         )
         total_numpy_time += time.time() - start_time
 

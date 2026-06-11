@@ -6,12 +6,15 @@ set -e
 
 EXP=experiments/E139-rtu-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11
 
+# Reward switches every 250k steps (square wave: half of the 500k period).
+SWITCHES=$(seq 250000 250000 9750000)
+
 # Reward curve (sanity / baseline).
 python src/learning_curve.py "$EXP" \
     --metrics ewm_reward \
     --filter-alg-apertures RealTimeActorCriticMLP:9 \
     --end-frame 10000000 \
-    --vertical-lines 500000 1000000 1500000 2000000 2500000 3000000 3500000 4000000 4500000 5000000 5500000 6000000 6500000 7000000 7500000 8000000 8500000 9000000 9500000
+    --vertical-lines $SWITCHES
 
 # Effective feature rank at all 6 probe sites.
 python src/learning_curve.py "$EXP" \
@@ -30,3 +33,8 @@ python src/learning_curve.py "$EXP" \
     --metrics dormant_actor_rtu dormant_critic_rtu \
     --filter-alg-apertures RealTimeActorCriticMLP:9 \
     --end-frame 10000000
+
+# Per-layer gradient norms (l0/l1/l2), first-rollout-normalized and
+# parameter-count-weighted. Reads the per-seed .npz directly (not the parquet),
+# so run this where the raw results live.
+python src/grad_norm_curve.py "$EXP"
