@@ -1,12 +1,12 @@
 {
-    "agent": "PPO-RTU_LN_128_1",
+    "agent": "PPO-RTU_LN_128_1_crelu",
     "problem": "Foragax",
     "total_steps": 10000000,
     "metaParameters": {
         "environment": {
-            "env_id": "ForagaxBig-v5",
+            "env_id": "ForagaxSquareWaveTwoBiome-v11",
             "aperture_size": 9,
-            "observation_type": "rgb"
+            "observation_type": "color"
         },
         "experiment": {
             "seed_offset": 0,
@@ -24,10 +24,10 @@
         "gradient_clipping": true,
         "max_grad_norm": 0.5,
         "vf_coef": 0.5,
-        "entropy_coef": 0.1,
+        "entropy_coef": 1.0,
         "optimizer_actor": {
             "name": "Adam",
-            "alpha": 0.0003,
+            "alpha": 0.0001,
             "beta1": 0.9,
             "beta2": 0.999,
             "eps": 1e-5
@@ -42,6 +42,7 @@
         "representation": {
             "hidden": 64,
             "d_hidden": 512,
+            "activation": "crelu",
             "use_layernorm": true,
             "conv": "PConv2DConv2D"
         }
