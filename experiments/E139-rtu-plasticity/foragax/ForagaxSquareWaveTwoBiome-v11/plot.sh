@@ -7,7 +7,9 @@ set -e
 EXP=experiments/E139-rtu-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11
 
 # Reward switches every 250k steps (square wave: half of the 500k period).
-SWITCHES=$(seq 250000 250000 9750000)
+# Use %.0f so macOS/BSD seq emits plain integers (it defaults to %g, which
+# renders e.g. 1000000 as "1e+06" and breaks --vertical-lines int parsing).
+SWITCHES=$(seq -f "%.0f" 250000 250000 9750000)
 
 # Reward curve (sanity / baseline).
 python src/learning_curve.py "$EXP" \
@@ -16,25 +18,25 @@ python src/learning_curve.py "$EXP" \
     --end-frame 10000000 \
     --vertical-lines $SWITCHES
 
-# Effective feature rank at all 6 probe sites.
-python src/learning_curve.py "$EXP" \
-    --metrics eff_rank_actor_pre1 eff_rank_critic_pre1 eff_rank_actor_rtu eff_rank_critic_rtu eff_rank_actor_pre2 eff_rank_critic_pre2 \
-    --filter-alg-apertures RealTimeActorCriticMLP:9 \
-    --end-frame 10000000
+# Full-run actor-vs-critic curves (absolute time), one subplot per layer, with
+# environment switches marked by faint dotted vertical lines. Overview companion
+# to the switch-triggered folds below. eff_rank is width-normalized.
+python src/plasticity_compare.py "$EXP"
 
-# Tanh saturation rate at the 4 pre-tanh probe sites (paper's "dormancy" under tanh).
-python src/learning_curve.py "$EXP" \
-    --metrics sat_rate_actor_pre1 sat_rate_critic_pre1 sat_rate_actor_pre2 sat_rate_critic_pre2 \
-    --filter-alg-apertures RealTimeActorCriticMLP:9 \
-    --end-frame 10000000
-
-# Sokar τ-dormant fraction at the 2 post-ReLU RTU-output probe sites.
-python src/learning_curve.py "$EXP" \
-    --metrics dormant_actor_rtu dormant_critic_rtu \
-    --filter-alg-apertures RealTimeActorCriticMLP:9 \
-    --end-frame 10000000
+# Switch-triggered ("peri-switch") plasticity analysis. Every metric family is
+# folded onto steps-relative-to-switch, centered so the pre-switch plateau is on
+# screen next to tau=0: effective rank (width-normalized: pre1/pre2 = 64, RTU =
+# 2*d_hidden = 1024), tanh saturation rate, and RTU dormancy. Actor vs critic.
+#   - fold:         canonical average response over a mid-training window.
+#   - fold-overlay: the same fold at early/mid/late windows, to expose how the
+#                   transient changes over training (plasticity loss).
+# Biomes are symmetric, so switches are folded together on the 250k half-period.
+python src/plasticity_compare.py "$EXP" --mode fold --window 4500000:5500000:500
+python src/plasticity_compare.py "$EXP" --mode fold-overlay \
+    --windows 1000000:2000000:500 4500000:5500000:500 9000000:10000000:500 \
+    --window-labels early mid late
 
 # Per-layer gradient norms (l0/l1/l2), first-rollout-normalized and
 # parameter-count-weighted. Reads the per-seed .npz directly (not the parquet),
 # so run this where the raw results live.
-python src/grad_norm_curve.py "$EXP"
+python src/grad_norm_curve.py "$EXP" --log-scale

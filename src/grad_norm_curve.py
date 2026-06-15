@@ -100,6 +100,11 @@ def main():
     parser.add_argument("experiment_path", type=str)
     parser.add_argument("--norms", nargs="+", default=["l0", "l1", "l2"])
     parser.add_argument("--sample-type", type=str, default="every")
+    parser.add_argument(
+        "--log-scale",
+        action="store_true",
+        help="Plot the y-axis (grad norm) on a log scale.",
+    )
     parser.add_argument("--out", type=str, default=None)
     args = parser.parse_args()
 
@@ -139,14 +144,21 @@ def main():
                 if lo is not None:
                     ax.fill_between(x, lo, hi, color=colors[name], alpha=0.15)
             ax.axhline(1.0, color="grey", lw=0.6, ls=":")
+            if args.log_scale:
+                ax.set_yscale("log")
             ax.set_ylabel(
                 f"{NORM_LABELS.get(norm, norm)} grad norm\n(norm. to rollout 1)"
             )
-            ax.legend(fontsize=8, ncol=3)
+    # Single legend on the first subplot (curves are identical across subplots).
+    axes[0, 0].legend(fontsize=8, ncol=3)
     axes[-1, 0].set_xlabel(r"Time steps ($\times 10^6$)")
     fig.tight_layout()
 
-    out = Path(args.out) if args.out else pq.parent / "plots" / "grad_norm_curves.pdf"
+    # Save alongside learning_curve.py's plots (under the experiments/ tree),
+    # not next to the parquet (results/ tree), so all figures land together.
+    exp_arg = Path(args.experiment_path)
+    plots_dir = (exp_arg.parent if exp_arg.suffix == ".parquet" else exp_arg) / "plots"
+    out = Path(args.out) if args.out else plots_dir / "grad_norm_curves.pdf"
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, bbox_inches="tight")
     print(f"Saved {out}")
