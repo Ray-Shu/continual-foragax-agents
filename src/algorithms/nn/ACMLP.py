@@ -1,12 +1,9 @@
 # Modified from esraaelelimy/continuing_ppo
 import flax.linen as nn
-from typing import Optional, Tuple, Union, Any, Sequence, Dict
 from flax.linen.initializers import constant, orthogonal
 import jax.numpy as jnp
 import numpy as np
 import distrax
-import functools
-from algorithms.nn.rtus.rtus import *
 
 
 class ActorCriticMLP(nn.Module):
@@ -51,6 +48,8 @@ class ActorCriticMLP(nn.Module):
         )(obs)
         if self.use_layernorm:
             actor_embedding = nn.LayerNorm(name="actor_layernorm1")(actor_embedding)
+        # Pre-tanh probe (see plasticity-metric probes in rtu_ppo.py).
+        self.sow("intermediates", "actor_pre1", actor_embedding)
         actor_embedding = activation(actor_embedding)
         actor_embedding = jnp.concatenate(
             (actor_embedding, last_action_encoded, last_reward_plus), axis=-1
@@ -64,6 +63,7 @@ class ActorCriticMLP(nn.Module):
         )(obs)
         if self.use_layernorm:
             critic_embedding = nn.LayerNorm(name="critic_layernorm1")(critic_embedding)
+        self.sow("intermediates", "critic_pre1", critic_embedding)
         critic_embedding = activation(critic_embedding)
         critic_embedding = jnp.concatenate(
             (critic_embedding, last_action_encoded, last_reward_plus), axis=-1
@@ -81,6 +81,11 @@ class ActorCriticMLP(nn.Module):
             bias_init=constant(0.0),
             name="critic_dense2",
         )(critic_embedding)
+        # Wide (d_hidden) layer occupying the RTU's position, but linear: this
+        # MLP has no nonlinearity between dense2 and dense3. Probed for effective
+        # rank (and a near-zero-output fraction in lieu of ReLU dormancy).
+        self.sow("intermediates", "actor_mid", actor_embedding)
+        self.sow("intermediates", "critic_mid", critic_embedding)
 
         actor_mean = nn.Dense(
             self.hidden_size,
@@ -90,6 +95,7 @@ class ActorCriticMLP(nn.Module):
         )(actor_embedding)
         if self.use_layernorm:
             actor_mean = nn.LayerNorm(name="actor_layernorm2")(actor_mean)
+        self.sow("intermediates", "actor_pre2", actor_mean)
         actor_mean = activation(actor_mean)
         actor_mean = nn.Dense(
             self.action_dim,
@@ -114,6 +120,7 @@ class ActorCriticMLP(nn.Module):
         )(critic_embedding)
         if self.use_layernorm:
             critic = nn.LayerNorm(name="critic_layernorm2")(critic)
+        self.sow("intermediates", "critic_pre2", critic)
         critic = activation(critic)
         critic = nn.Dense(
             1, kernel_init=orthogonal(1.0), bias_init=constant(0.0), name="critic_value"

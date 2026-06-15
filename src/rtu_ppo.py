@@ -252,6 +252,51 @@ def _compute_plasticity_metrics(params, apply_fn, init_hstate, traj_obs):
     )
 
 
+def _compute_plasticity_metrics_mlp(params, apply_fn, init_hstate, traj_obs):
+    """Vanilla ActorCriticMLP analogue of _compute_plasticity_metrics.
+
+    ActorCriticMLP is feedforward and all-tanh, with a linear wide layer
+    (dense2, width d_hidden) in the position the RTU occupies. Probe sites:
+      actor/critic_pre1, actor/critic_pre2 (pre-tanh) -> effective rank +
+          saturation rate, exactly as in the RTU net.
+      actor/critic_mid (the linear wide layer)        -> effective rank only.
+
+    There is no dormancy metric: that layer is linear (no ReLU) and has a
+    rescaling symmetry (scale dense2 up, dense3 down -> identical function), so
+    any per-unit magnitude/variance "dormant" measure is ill-defined. The linear
+    analogue of dead capacity is rank deficiency, already captured by the mid
+    effective rank. The dormant_*_rtu slots are therefore NaN (plots omit them).
+
+    Returns the same 12-scalar tuple, in the same order, as
+    _compute_plasticity_metrics (so the unpacking at save time is shared); the
+    two dormant entries are NaN.
+    """
+    _, state = apply_fn(
+        params, init_hstate, traj_obs, mutable=["intermediates"]
+    )
+    inter = state["intermediates"]
+    a_pre1 = inter["actor_pre1"][0]
+    c_pre1 = inter["critic_pre1"][0]
+    a_mid = inter["actor_mid"][0]
+    c_mid = inter["critic_mid"][0]
+    a_pre2 = inter["actor_pre2"][0]
+    c_pre2 = inter["critic_pre2"][0]
+    return (
+        _effective_rank(a_pre1),
+        _effective_rank(c_pre1),
+        _effective_rank(a_mid),
+        _effective_rank(c_mid),
+        _effective_rank(a_pre2),
+        _effective_rank(c_pre2),
+        _saturation_rate(a_pre1),
+        _saturation_rate(c_pre1),
+        _saturation_rate(a_pre2),
+        _saturation_rate(c_pre2),
+        jnp.float32(jnp.nan),  # no valid Sokar dormancy on the linear mid layer
+        jnp.float32(jnp.nan),
+    )
+
+
 def _zero_plasticity_metrics():
     z = jnp.float32(0.0)
     return (z, z, z, z, z, z, z, z, z, z, z, z)
@@ -1205,10 +1250,14 @@ def experiment(rng, config: TrainConfig):
         # Uses pre-update params and the rollout's actual init hidden state
         # (`hstate`, the carry from the previous iteration), so the captured
         # activations match what the rollout actually saw. Guarded statically
-        # on agent_type — only RealTimeActorCriticMLP has the sow calls
-        # wired up; other variants emit zeros.
+        # on agent_type — RealTimeActorCriticMLP and the vanilla ActorCriticMLP
+        # have the sow calls wired up; other variants emit zeros.
         if config.agent_type == "RealTimeActorCriticMLP":
             plasticity = _compute_plasticity_metrics(
+                train_state.params, train_state.apply_fn, hstate, traj_batch.obs
+            )
+        elif config.agent_type == "ActorCriticMLP":
+            plasticity = _compute_plasticity_metrics_mlp(
                 train_state.params, train_state.apply_fn, hstate, traj_batch.obs
             )
         else:
