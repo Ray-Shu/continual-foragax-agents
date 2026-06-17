@@ -72,6 +72,11 @@ FAMILIES = {
         "normalize_by_width": False,
         "layers": [("pre1", "Pre-tanh 1"), ("pre2", "Pre-tanh 2")],
     },
+    "sat_persist": {
+        "ylabel": "Persistent saturation (|EMA tanh| > $\\tau$)",
+        "normalize_by_width": False,
+        "layers": [("pre1", "Pre-tanh 1"), ("pre2", "Pre-tanh 2")],
+    },
     "dormant": {
         "ylabel": "Dormant fraction ($\\tau$=0.025)",
         "normalize_by_width": False,
@@ -130,10 +135,11 @@ def _layer_titles(agent: str) -> dict:
 
 def _families_for(agent: str) -> list:
     """Metric families that are meaningful for the architecture. Vanilla has no
-    post-ReLU site, so no Sokar dormancy."""
+    post-ReLU site, so no Sokar dormancy. Both have the tanh sites, so both get
+    instantaneous (sat_rate) and persistent (sat_persist) saturation."""
     if _is_vanilla(agent):
-        return ["eff_rank", "sat_rate"]
-    return ["eff_rank", "sat_rate", "dormant"]
+        return ["eff_rank", "sat_rate", "sat_persist"]
+    return ["eff_rank", "sat_rate", "dormant", "sat_persist"]
 
 
 def _mean_ci(values_by_seed: np.ndarray, n_boot: int = 1000):
@@ -412,6 +418,9 @@ def main():
     df_all = pl.read_parquet(pq)
     if args.alg:
         df_all = df_all.filter(pl.col("alg") == args.alg)
+        if df_all.height == 0:
+            print(f"No rows for alg {args.alg} — skipping.")
+            return
     elif df_all["alg"].n_unique() > 1:
         sys.exit(f"Multiple algs present {df_all['alg'].unique().to_list()}; pass --alg.")
 
@@ -426,7 +435,20 @@ def main():
     dropped = [f for f in args.families if f not in meaningful]
     if dropped:
         print(f"Skipping families not defined for {agent}: {dropped}")
-    plots_dir = (exp.parent if exp.suffix == ".parquet" else exp) / "plots"
+    # Skip families with no columns in the parquet yet (e.g. sat_persist before a
+    # re-run that collects it) so we don't emit empty figures.
+    def _present(fam):
+        return any(
+            f"{fam}_{role}_{layer}" in df_all.columns
+            for role in ("actor", "critic")
+            for layer, _ in FAMILIES[fam]["layers"]
+        )
+    absent = [f for f in families if not _present(f)]
+    if absent:
+        print(f"Skipping families with no data in the parquet: {absent}")
+    families = [f for f in families if _present(f)]
+    # One subfolder per algorithm so PPO and RTU figures don't mix.
+    plots_dir = (exp.parent if exp.suffix == ".parquet" else exp) / "plots" / agent
 
     if args.mode == "fold-overlay":
         present = set(df_all["sample_type"].unique().to_list())

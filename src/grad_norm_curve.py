@@ -49,7 +49,16 @@ def _parquet_path(experiment_path: Path) -> Path:
 
 
 def _layers_in(df: pl.DataFrame) -> list:
-    return sorted(c[len("grad_l2_") :] for c in df.columns if c.startswith("grad_l2_"))
+    """Layers with gradient data in this (alg-filtered) frame. The parquet merges
+    columns across algorithms, so a layer's columns can exist but be all-null for
+    a given alg — keep only layers whose grad_nparams is actually populated."""
+    layers = sorted(c[len("grad_l2_") :] for c in df.columns if c.startswith("grad_l2_"))
+    return [
+        layer
+        for layer in layers
+        if f"grad_nparams_{layer}" in df.columns
+        and df[f"grad_nparams_{layer}"].drop_nulls().len() > 0
+    ]
 
 
 def _combined_matrix(df: pl.DataFrame, norm: str, layers: list):
@@ -105,6 +114,10 @@ def main():
         action="store_true",
         help="Plot the y-axis (grad norm) on a log scale.",
     )
+    parser.add_argument(
+        "--alg", type=str, default=None,
+        help="Restrict to one algorithm; output then lands in plots/<alg>/.",
+    )
     parser.add_argument("--out", type=str, default=None)
     args = parser.parse_args()
 
@@ -112,6 +125,11 @@ def main():
     if not pq.exists():
         sys.exit(f"No parquet at {pq} — run process_data.py first.")
     df = pl.read_parquet(pq).filter(pl.col("sample_type") == args.sample_type)
+    if args.alg:
+        df = df.filter(pl.col("alg") == args.alg)
+        if df.height == 0:
+            print(f"No rows for alg {args.alg} — skipping.")
+            return
     if df.height == 0:
         sys.exit(f"No rows with sample_type == {args.sample_type}")
     if not _layers_in(df):
@@ -158,6 +176,8 @@ def main():
     # not next to the parquet (results/ tree), so all figures land together.
     exp_arg = Path(args.experiment_path)
     plots_dir = (exp_arg.parent if exp_arg.suffix == ".parquet" else exp_arg) / "plots"
+    if args.alg:
+        plots_dir = plots_dir / args.alg
     out = Path(args.out) if args.out else plots_dir / "grad_norm_curves.pdf"
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, bbox_inches="tight")

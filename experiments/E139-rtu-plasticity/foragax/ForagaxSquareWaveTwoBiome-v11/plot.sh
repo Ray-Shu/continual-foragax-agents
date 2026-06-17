@@ -11,32 +11,31 @@ EXP=experiments/E139-rtu-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11
 # renders e.g. 1000000 as "1e+06" and breaks --vertical-lines int parsing).
 SWITCHES=$(seq -f "%.0f" 250000 250000 9750000)
 
-# Reward curve (sanity / baseline).
+# Reward curve (sanity / baseline), RTU vs PPO overlaid. Top-level cross-alg
+# comparison; the per-alg plasticity figures go in plots/<alg>/ below.
 python src/learning_curve.py "$EXP" \
     --metrics ewm_reward \
-    --filter-alg-apertures RealTimeActorCriticMLP:9 \
+    --filter-alg-apertures RealTimeActorCriticMLP:9 ActorCriticMLP:9 \
     --end-frame 10000000 \
     --vertical-lines $SWITCHES
 
-# Full-run actor-vs-critic curves (absolute time), one subplot per layer, with
-# environment switches marked by faint dotted vertical lines. Overview companion
-# to the switch-triggered folds below. eff_rank is width-normalized.
-python src/plasticity_compare.py "$EXP"
-
-# Switch-triggered ("peri-switch") plasticity analysis. Every metric family is
-# folded onto steps-relative-to-switch, centered so the pre-switch plateau is on
-# screen next to tau=0: effective rank (width-normalized: pre1/pre2 = 64, RTU =
-# 2*d_hidden = 1024), tanh saturation rate, and RTU dormancy. Actor vs critic.
-#   - fold:         canonical average response over a mid-training window.
-#   - fold-overlay: the same fold at early/mid/late windows, to expose how the
+# Per-layer plasticity plots, one algorithm at a time so the figures land in
+# separate plots/<agent>/ folders (an agent with no data yet is skipped):
+#   - absolute:     full-run actor-vs-critic curves, switches marked by faint
+#                   dotted lines. eff_rank is width-normalized.
+#   - fold:         switch-triggered average over a mid-training window, centered
+#                   so the pre-switch plateau sits next to tau=0.
+#   - fold-overlay: the same fold at early/mid/late windows, exposing how the
 #                   transient changes over training (plasticity loss).
 # Biomes are symmetric, so switches are folded together on the 250k half-period.
-python src/plasticity_compare.py "$EXP" --mode fold --window 4500000:5500000:500
-python src/plasticity_compare.py "$EXP" --mode fold-overlay \
-    --windows 1000000:2000000:500 4500000:5500000:500 9000000:10000000:500 \
-    --window-labels early mid late
+for alg in RealTimeActorCriticMLP ActorCriticMLP; do
+    python src/plasticity_compare.py "$EXP" --alg "$alg"
+    python src/plasticity_compare.py "$EXP" --alg "$alg" --mode fold --window 4500000:5500000:500
+    python src/plasticity_compare.py "$EXP" --alg "$alg" --mode fold-overlay \
+        --windows 1000000:2000000:500 4500000:5500000:500 9000000:10000000:500 \
+        --window-labels early mid late
 
-# Per-layer gradient norms (l0/l1/l2), first-rollout-normalized and
-# parameter-count-weighted. Reads the per-seed .npz directly (not the parquet),
-# so run this where the raw results live.
-python src/grad_norm_curve.py "$EXP" --log-scale
+    # Per-layer gradient norms (l0/l1/l2), first-rollout-normalized and
+    # parameter-count-weighted, read from the parquet, into plots/<alg>/.
+    python src/grad_norm_curve.py "$EXP" --alg "$alg" --log-scale
+done
