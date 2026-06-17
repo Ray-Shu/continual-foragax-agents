@@ -136,6 +136,8 @@ class TrainConfig:
 
     id: int
     reward_trace_decay: float
+    sat_persist_decay: float
+    sat_persist_threshold: float
     gamma: float
     gae_lambda: float
     clip_eps: float
@@ -300,6 +302,29 @@ def _compute_plasticity_metrics_mlp(params, apply_fn, init_hstate, traj_obs):
 def _zero_plasticity_metrics():
     z = jnp.float32(0.0)
     return (z, z, z, z, z, z, z, z, z, z, z, z)
+
+
+def _mean_tanh_sites(params, apply_fn, init_hstate, traj_obs):
+    """Per-neuron signed mean of tanh(pre-activation) over the rollout's states,
+    at the four tanh probe sites (actor/critic x pre1/pre2), as a (4, width)
+    array. This feeds the persistent-saturation EMA: tanh is applied per state
+    and then averaged (signed), so a unit that flips rails across states averages
+    toward 0, while one pinned to the same rail stays near +/-1. Both
+    RealTimeActorCriticMLP and the vanilla ActorCriticMLP expose these sites.
+    (A separate forward pass from _compute_plasticity_metrics; cheap relative to
+    the PPO update.)
+    """
+    _, state = apply_fn(params, init_hstate, traj_obs, mutable=["intermediates"])
+    inter = state["intermediates"]
+
+    def _mt(name):
+        h = inter[name][0]
+        h = h.reshape(-1, h.shape[-1])
+        return jnp.mean(jnp.tanh(h), axis=0)
+
+    return jnp.stack(
+        [_mt("actor_pre1"), _mt("critic_pre1"), _mt("actor_pre2"), _mt("critic_pre2")]
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -1136,7 +1161,7 @@ def experiment(rng, config: TrainConfig):
 
     @scan_tqdm(config.num_updates, print_rate=min(100, config.num_updates//20))
     def experiment_step(carry, iteration_idx):
-        env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers = carry
+        env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers, sat_ema = carry
         (
             train_state,
             gymnax_state,
@@ -1263,6 +1288,27 @@ def experiment(rng, config: TrainConfig):
         else:
             plasticity = _zero_plasticity_metrics()
 
+        # Persistent-saturation EMA. Per rollout, take the signed mean of tanh
+        # per neuron at the tanh sites, EMA it across rollouts (decay
+        # sat_persist_decay), then report the fraction of neurons whose EMA is
+        # pinned past sat_persist_threshold -- i.e. stuck at a rail across many
+        # visited states, the persistent analogue of the instantaneous sat_rate.
+        if config.agent_type in ("RealTimeActorCriticMLP", "ActorCriticMLP"):
+            mean_tanh = _mean_tanh_sites(
+                train_state.params, train_state.apply_fn, hstate, traj_batch.obs
+            )
+        else:
+            mean_tanh = jnp.zeros((4, config.hidden_size), dtype=jnp.float32)
+        sat_ema = (
+            config.sat_persist_decay * sat_ema
+            + (1.0 - config.sat_persist_decay) * mean_tanh
+        )
+        # (4,) in the order: actor_pre1, critic_pre1, actor_pre2, critic_pre2.
+        sat_persist = jnp.mean(
+            (jnp.abs(sat_ema) > config.sat_persist_threshold).astype(jnp.float32),
+            axis=1,
+        )
+
         # Conditionally perform the update based on how many env steps have elapsed.
         # If freeze_steps <= 0, updates are always performed.
         # Otherwise, once log_env_state.timestep exceeds freeze_steps, we stop updating.
@@ -1380,7 +1426,7 @@ def experiment(rng, config: TrainConfig):
         )
 
         # Optional lightweight debug
-        carry_out = (env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers)
+        carry_out = (env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers, sat_ema)
         return carry_out, (
             rewards,
             pos,
@@ -1390,18 +1436,20 @@ def experiment(rng, config: TrainConfig):
             biome_regret,
             biome_rank,
             plasticity,
+            sat_persist,
             grad_norms,
         )
 
     # Run training loop with lax.scan (collect per-iteration rewards)
-    init_carry = (env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers)
+    sat_ema_init = jnp.zeros((4, config.hidden_size), dtype=jnp.float32)
+    init_carry = (env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers, sat_ema_init)
     last_carry, info = jax.lax.scan(
         experiment_step,
         PBar(id=config.id, carry=init_carry),
         xs=jnp.arange(int(config.num_updates)),
     )
     (rewards, pos, loss_info, biome_id, object_collected_id,
-     biome_regret, biome_rank, plasticity, grad_norms) = info
+     biome_regret, biome_rank, plasticity, sat_persist, grad_norms) = info
     rewards = rewards.reshape((-1))
     pos = pos.reshape((-1, pos.shape[-1]))
     total_loss = jnp.mean(loss_info[0], axis=(-1, -2))
@@ -1417,7 +1465,8 @@ def experiment(rng, config: TrainConfig):
     object_collected_id = object_collected_id.reshape((-1))
     biome_regret = biome_regret.reshape((-1))
     biome_rank = biome_rank.reshape((-1))
-    # plasticity is a tuple of 10 arrays of shape (num_updates,). Keep as-is.
+    # plasticity is a tuple of 12 arrays of shape (num_updates,). Keep as-is.
+    # sat_persist is (num_updates, 4): actor_pre1, critic_pre1, actor_pre2, critic_pre2.
     env_step_state = last_carry.carry[0]
     frames = env_step_state[2].frames
     return (
@@ -1429,6 +1478,7 @@ def experiment(rng, config: TrainConfig):
         biome_regret,
         biome_rank,
         plasticity,
+        sat_persist,
         frames,
         grad_norms,
         grad_nparams,
@@ -1594,6 +1644,8 @@ def main():
             ),
             conv=str(hypers.get("representation", {}).get("conv", "Conv2D")),
             reward_trace_decay=float(hypers.get("reward_trace_decay", 1.0)),
+            sat_persist_decay=float(hypers.get("sat_persist_decay", 0.99)),
+            sat_persist_threshold=float(hypers.get("sat_persist_threshold", 0.95)),
             num_updates=num_updates,
             aperture_size=int(hypers["environment"]["aperture_size"]),
             render_mode=hypers["environment"].get("render_mode", "world_reward"),
@@ -1637,6 +1689,7 @@ def main():
         biome_regret,
         biome_rank,
         plasticity,
+        sat_persist,
         frames,
         grad_norms,
         grad_nparams,
@@ -1649,6 +1702,8 @@ def main():
      sat_rate_actor_pre1, sat_rate_critic_pre1,
      sat_rate_actor_pre2, sat_rate_critic_pre2,
      dormant_actor_rtu,   dormant_critic_rtu) = plasticity
+    # sat_persist: (num_runs, num_updates, 4), columns actor_pre1, critic_pre1,
+    # actor_pre2, critic_pre2 (the persistent-saturation EMA fraction per site).
 
     # --------------------
     # -- Saving --
@@ -1684,6 +1739,7 @@ def main():
         run_sat_rate_critic_pre2 = sat_rate_critic_pre2[i]
         run_dormant_actor_rtu = dormant_actor_rtu[i]
         run_dormant_critic_rtu = dormant_critic_rtu[i]
+        run_sat_persist = sat_persist[i]  # (num_updates, 4)
         run_frames = frames[i]
         start_time = time.time()
         # for reward in run_rewards:
@@ -1754,6 +1810,10 @@ def main():
             sat_rate_critic_pre2=run_sat_rate_critic_pre2,
             dormant_actor_rtu=run_dormant_actor_rtu,
             dormant_critic_rtu=run_dormant_critic_rtu,
+            sat_persist_actor_pre1=run_sat_persist[:, 0],
+            sat_persist_critic_pre1=run_sat_persist[:, 1],
+            sat_persist_actor_pre2=run_sat_persist[:, 2],
+            sat_persist_critic_pre2=run_sat_persist[:, 3],
             **run_grad_norm_kwargs,
         )
         total_numpy_time += time.time() - start_time
