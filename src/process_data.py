@@ -108,6 +108,17 @@ def main(experiment_path: Path):
 
     all_df = pl.concat(dfs, how="diagonal_relaxed")
     all_df = all_df.sort(["env", "group", "alg", "id", "frame"])
+    # Defensive de-duplication: re-running training without clearing prior
+    # results can leave two metadata variants of the same (run, frame) in the
+    # collection (e.g. a config gained a hyperparameter between runs), which
+    # would otherwise double every row and silently tighten CIs. Keep the last
+    # (most recent) per natural key.
+    key = ["env", "group", "alg", "aperture", "seed", "frame", "sample_type"]
+    key = [c for c in key if c in all_df.columns]
+    before = all_df.height
+    all_df = all_df.unique(subset=key, keep="last", maintain_order=True)
+    if all_df.height != before:
+        print(f"Dropped {before - all_df.height} duplicate rows (kept {all_df.height}).")
     all_df.write_parquet(output_path)
     print(f"Data saved to {output_path}")
 

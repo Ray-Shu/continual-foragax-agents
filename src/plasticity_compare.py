@@ -154,8 +154,11 @@ def _mean_ci(values_by_seed: np.ndarray, n_boot: int = 1000):
 
 
 def _series(df: pl.DataFrame, col: str):
-    """(frames, seed-major value matrix) for one metric column."""
-    piv = df.pivot(values=col, index="seed", on="frame").sort("seed")
+    """(frames, seed-major value matrix) for one metric column. aggregate_function
+    guards against duplicate (seed, frame) rows (e.g. a doubled parquet)."""
+    piv = df.pivot(
+        values=col, index="seed", on="frame", aggregate_function="mean"
+    ).sort("seed")
     frame_cols = sorted((c for c in piv.columns if c != "seed"), key=lambda c: int(c))
     mat = piv.select(frame_cols).to_numpy()
     frames = np.array([int(c) for c in frame_cols])
