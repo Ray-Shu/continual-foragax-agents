@@ -9,6 +9,7 @@ Examples:
         -e experiments/X33-ForagaxSquareWaveTwoBiome-v11/foragax/ForagaxSquareWaveTwoBiome-v11 \
         -a PPO_LN_128 -f 9
 """
+
 import argparse
 import sys
 import warnings
@@ -26,7 +27,7 @@ def _normalize_exp(exp: str) -> str:
     exp = exp.strip().rstrip("/")
     for prefix in ("experiments/", "results/"):
         if exp.startswith(prefix):
-            exp = exp[len(prefix):]
+            exp = exp[len(prefix) :]
     return exp
 
 
@@ -67,7 +68,8 @@ def main():
 
     # Each panel lists every column that could supply it, paired with a series
     # label.  DQN runs write `churn_norm` / `ntk_rank` / `ntk_cond`; PPO runs write
-    # separate `value_*` / `policy_*` columns.  Only the columns actually present in
+    # separate `value_*` / `policy_*` columns (hard `*_ntk_rank` plus effective
+    # `*_ntk_eff_rank`, no condition number).  Only the columns actually present in
     # the loaded data are plotted, so this works unchanged for either agent (or a
     # mix), drawing one line per available series.
     # Panels are laid out on a grid by their `row`: row 0 holds the churn / NTK
@@ -98,13 +100,21 @@ def main():
         },
         {
             "row": 0,
+            "ylabel": "NTK Effective Rank",
+            "title": "NTK Effective (Stable) Rank Over Time",
+            "log": False,
+            "series": [
+                ("value_ntk_eff_rank", "Value (PPO)"),
+                ("policy_ntk_eff_rank", "Policy (PPO)"),
+            ],
+        },
+        {
+            "row": 0,
             "ylabel": "NTK Condition Number",
             "title": "NTK Condition Number Over Time",
             "log": True,  # condition numbers span many orders of magnitude
             "series": [
                 ("ntk_cond", "DQN"),
-                ("value_ntk_cond", "Value (PPO)"),
-                ("policy_ntk_cond", "Policy (PPO)"),
             ],
         },
         {
@@ -161,7 +171,9 @@ def main():
             v = np.asarray(r[col], dtype=float).reshape(-1)
             if v.shape[0] == 0:
                 continue
-            base_len = r["rewards"].reshape(-1).shape[0] if "rewards" in r else v.shape[0]
+            base_len = (
+                r["rewards"].reshape(-1).shape[0] if "rewards" in r else v.shape[0]
+            )
             steps_per_point = base_len / v.shape[0]
             arrays.append(v)
 
