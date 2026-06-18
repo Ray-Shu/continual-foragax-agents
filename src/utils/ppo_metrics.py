@@ -149,10 +149,11 @@ def value_metrics(
 
     NTK is measured on the post-update parameters (the network's current state,
     matching the DQN convention).  Churn is the norm of the value change on
-    ``x_ref`` from ``params_before`` to ``params_after``.
+    ``x_ref`` from ``params_before`` to ``params_after``, normalized by gradient
+    and weight-update norms to be scale-invariant.
 
     Returns:
-        ``(rank, cond, churn)`` as scalar arrays.
+        ``(rank, cond, churn)`` as scalar arrays, where churn is relative (bounded [0,1]).
     """
 
     def value_of(params, x):
@@ -160,10 +161,10 @@ def value_metrics(
         _, _, value = apply_fn(params, init_hstate, obs)
         return value[0]
 
-    # Per-sample predictions before / after the update -> churn.
+    # Per-sample predictions before / after the update -> churn numerator.
     pred_before = jax.vmap(value_of, in_axes=(None, 0))(params_before, x_ref)
     pred_after = jax.vmap(value_of, in_axes=(None, 0))(params_after, x_ref)
-    churn = jnp.linalg.norm(pred_after - pred_before)
+    churn_numerator = jnp.linalg.norm(pred_after - pred_before)
 
     # NTK on the current (post-update) params.
     n_ref = x_ref.shape[0]
@@ -171,6 +172,25 @@ def value_metrics(
         params_after, x_ref
     )
     jac_flat = _flatten_jacobian(jac, n_ref)
+
+    # Gradient norm: ||∇f_θ(x)|| for each sample, then aggregate.
+    # Each row of jac_flat is the gradient for one sample; compute L2 norm per row.
+    grad_norms = jnp.linalg.norm(jac_flat, axis=1)  # [n_ref]
+    grad_norm_aggregate = jnp.linalg.norm(grad_norms)  # scalar
+
+    # Weight update norm: ||ΔΘ|| = ||params_after - params_before||
+    leaves_before = jax.tree_util.tree_leaves(params_before)
+    leaves_after = jax.tree_util.tree_leaves(params_after)
+    delta_leaves = [
+        jnp.sum(jnp.square(a - b)) for a, b in zip(leaves_after, leaves_before)
+    ]
+    weight_update_norm = jnp.sqrt(sum(delta_leaves, 0.0))
+
+    # Relative churn: bounded [0, 1] by Cauchy-Schwarz.
+    # Add small epsilon to avoid division by zero when network is completely plastic.
+    eps = 1e-8
+    churn = churn_numerator / (grad_norm_aggregate * weight_update_norm + eps)
+
     rank, cond = _ntk_rank_cond(jac_flat)
     return rank, cond, churn
 
@@ -189,10 +209,11 @@ def policy_metrics(
     The policy output is the ``action_dim`` logit vector, so the Jacobian has
     ``n_ref * action_dim`` rows.  Churn is measured on the action probabilities
     (softmax of the logits), the interpretable notion of how much the policy
-    moved on the reference set in one update.
+    moved on the reference set in one update. Churn is normalized by gradient
+    and weight-update norms to be scale-invariant.
 
     Returns:
-        ``(rank, cond, churn)`` as scalar arrays.
+        ``(rank, cond, churn)`` as scalar arrays, where churn is relative (bounded [0,1]).
     """
 
     def logits_of(params, x):
@@ -207,7 +228,7 @@ def policy_metrics(
 
     pred_before = jax.vmap(probs_of, in_axes=(None, 0))(params_before, x_ref)
     pred_after = jax.vmap(probs_of, in_axes=(None, 0))(params_after, x_ref)
-    churn = jnp.linalg.norm(pred_after - pred_before)
+    churn_numerator = jnp.linalg.norm(pred_after - pred_before)
 
     n_ref = x_ref.shape[0]
     # jacrev of a vector output -> leaves carry a leading action_dim axis;
@@ -216,6 +237,25 @@ def policy_metrics(
         params_after, x_ref
     )
     jac_flat = _flatten_jacobian(jac, n_ref * action_dim)
+
+    # Gradient norm: ||∇f_θ(x)|| for each (sample, action) pair, then aggregate.
+    # Each row corresponds to one action output at one sample; compute L2 norm per row.
+    grad_norms = jnp.linalg.norm(jac_flat, axis=1)  # [n_ref * action_dim]
+    grad_norm_aggregate = jnp.linalg.norm(grad_norms)  # scalar
+
+    # Weight update norm: ||ΔΘ|| = ||params_after - params_before||
+    leaves_before = jax.tree_util.tree_leaves(params_before)
+    leaves_after = jax.tree_util.tree_leaves(params_after)
+    delta_leaves = [
+        jnp.sum(jnp.square(a - b)) for a, b in zip(leaves_after, leaves_before)
+    ]
+    weight_update_norm = jnp.sqrt(sum(delta_leaves, 0.0))
+
+    # Relative churn: bounded [0, 1] by Cauchy-Schwarz.
+    # Add small epsilon to avoid division by zero.
+    eps = 1e-8
+    churn = churn_numerator / (grad_norm_aggregate * weight_update_norm + eps)
+
     rank, cond = _ntk_rank_cond(jac_flat)
     return rank, cond, churn
 

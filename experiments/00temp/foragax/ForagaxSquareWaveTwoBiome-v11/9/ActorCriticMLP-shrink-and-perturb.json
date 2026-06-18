@@ -1,20 +1,15 @@
 {
-    "agent": "PPO_LN_128",
+    "agent": "ActorCriticMLP-shrink-and-perturb",
     "problem": "Foragax",
-    "total_steps": 2000000,
+    "total_steps": 10000000,
     "metaParameters": {
         "environment": {
-            "env_id": "ForagaxBig-v5",
+            "env_id": "ForagaxSquareWaveTwoBiome-v11",
             "aperture_size": 9,
-            "observation_type": "rgb"
+            "observation_type": "color"
         },
         "experiment": {
-            "seed_offset": 0,
-            "video_length": 10000,
-            "video_every": 100000,
-            "ntk_freq": 50000, 
-            "x_ref_steps": 100,
-            "weight_norm_freq": 50000
+            "seed_offset": 0
         },
         "gamma": 0.99,
         "gae_lambda": 0.95,
@@ -25,17 +20,20 @@
         "gradient_clipping": true,
         "max_grad_norm": 0.5,
         "vf_coef": 0.5,
-        "entropy_coef": 0.1,
+        "sp_steps": 10000,
+        "shrink_factor": 0.9,
+        "noise_scale": 0.01,
+        "entropy_coef": 0.01,
         "optimizer_actor": {
             "name": "Adam",
-            "alpha": 0.0001,
+            "alpha": 0.0003,
             "beta1": 0.9,
             "beta2": 0.999,
             "eps": 1e-05
         },
         "optimizer_critic": {
             "name": "Adam",
-            "lr_scale": 10.0,
+            "lr_scale": 0.1,
             "beta1": 0.9,
             "beta2": 0.999,
             "eps": 1e-05
@@ -43,8 +41,7 @@
         "representation": {
             "hidden": 64,
             "d_hidden": 512,
-            "use_layernorm": true,
-            "conv": "PConv2DConv2D"
+            "use_layernorm": true
         }
     }
 }
