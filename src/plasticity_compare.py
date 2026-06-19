@@ -80,7 +80,14 @@ FAMILIES = {
     "dormant": {
         "ylabel": "Dormant fraction ($\\tau$=0.025)",
         "normalize_by_width": False,
-        "layers": [("rtu", "RTU output")],
+        # rtu for the tanh RTU net; pre1/rtu/pre2 for the all-ReLU net (the
+        # pre1/pre2 columns are simply absent for the tanh net and skipped).
+        "layers": [("pre1", "Pre-tanh 1"), ("rtu", "RTU output"), ("pre2", "Pre-tanh 2")],
+    },
+    "dormant_persist": {
+        "ylabel": "Persistent dormancy (EMA, score$\\leq$0.025)",
+        "normalize_by_width": False,
+        "layers": [("pre1", "Pre-tanh 1"), ("rtu", "RTU output"), ("pre2", "Pre-tanh 2")],
     },
 }
 
@@ -100,6 +107,10 @@ def _parquet_path(experiment_path: Path) -> Path:
 
 def _is_vanilla(agent: str) -> bool:
     return agent == "ActorCriticMLP"
+
+
+def _is_relu(agent: str) -> bool:
+    return agent == "RealTimeActorCriticMLPReLU"
 
 
 def _layer_widths(experiment_path: Path, agent: str) -> dict:
@@ -128,18 +139,41 @@ def _layer_widths(experiment_path: Path, agent: str) -> dict:
 
 
 def _layer_titles(agent: str) -> dict:
-    """Architecture-aware panel titles for the wide ('rtu') slot."""
-    mid = "Wide layer (linear)" if _is_vanilla(agent) else "RTU output"
+    """Architecture-aware panel titles. The pre1/pre2 sites are pre-tanh in the
+    tanh nets and post-ReLU in the all-ReLU net; the wide slot is the linear
+    Dense for vanilla, else the RTU output."""
+    if _is_vanilla(agent):
+        mid = "Wide layer (linear)"
+    else:
+        mid = "RTU output"
+    if _is_relu(agent):
+        return {"pre1": "ReLU 1", "pre2": "ReLU 2", "rtu": mid}
     return {"pre1": "Pre-tanh 1", "pre2": "Pre-tanh 2", "rtu": mid}
 
 
 def _families_for(agent: str) -> list:
-    """Metric families that are meaningful for the architecture. Vanilla has no
-    post-ReLU site, so no Sokar dormancy. Both have the tanh sites, so both get
-    instantaneous (sat_rate) and persistent (sat_persist) saturation."""
+    """Metric families that are meaningful for the architecture.
+      - all-ReLU RTU: dormancy (+ persistent dormancy) at every layer; no tanh,
+        so no saturation families.
+      - vanilla MLP: tanh saturation (+ persistent); no Sokar dormancy (the wide
+        layer is linear).
+      - tanh RTU: saturation at the tanh sites, dormancy at the RTU output."""
+    if _is_relu(agent):
+        return ["eff_rank", "dormant", "dormant_persist"]
     if _is_vanilla(agent):
         return ["eff_rank", "sat_rate", "sat_persist"]
     return ["eff_rank", "sat_rate", "dormant", "sat_persist"]
+
+
+def _present_layers(family, cfg, df):
+    """cfg layers that actually have a column for this agent/data, so families
+    whose layer set is wider than a given net (e.g. dormant: pre1/rtu/pre2 for
+    ReLU but rtu-only for the tanh RTU) don't render empty panels."""
+    return [
+        (layer, title)
+        for (layer, title) in cfg["layers"]
+        if any(f"{family}_{role}_{layer}" in df.columns for role in ("actor", "critic"))
+    ]
 
 
 def _mean_ci(values_by_seed: np.ndarray, n_boot: int = 1000):
@@ -203,7 +237,7 @@ def _eff_denom(cfg, widths, layer):
 
 
 def plot_family(df, family, cfg, widths, titles, out_dir, sample_type, save_type):
-    layers = cfg["layers"]
+    layers = _present_layers(family, cfg, df)
     fig, axes = plt.subplots(
         1, len(layers), figsize=(5.2 * len(layers), 4.0), squeeze=False
     )
@@ -264,7 +298,7 @@ def plot_fold_single(df, family, cfg, widths, titles, out_dir, window, save_type
                      pre=None, post=None):
     """Canonical switch-triggered average from a single window: per layer, actor
     vs critic, averaged over all switches in the window and over seeds."""
-    layers = cfg["layers"]
+    layers = _present_layers(family, cfg, df)
     fig, axes = plt.subplots(
         1, len(layers), figsize=(5.2 * len(layers), 4.0), squeeze=False
     )
@@ -312,7 +346,7 @@ def plot_fold_overlay(df_all, family, cfg, widths, titles, out_dir, windows, lab
     """Switch-triggered averages from several training-stage windows overlaid on
     one tau axis. Actor and critic on separate rows; one color per stage so a
     deepening / slowing transient over training (plasticity loss) is visible."""
-    layers = cfg["layers"]
+    layers = _present_layers(family, cfg, df_all)
     roles = ("actor", "critic")
     colors = (
         STAGE_COLORS

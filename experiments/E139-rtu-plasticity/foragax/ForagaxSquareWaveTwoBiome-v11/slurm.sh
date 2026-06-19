@@ -14,12 +14,18 @@ for fov in 9; do
         --entry src/rtu_ppo.py \
         -e experiments/E139-rtu-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11/${fov}/RealTimeActorCriticMLP.json
 
-    # Vanilla PPO baseline (feedforward; uses the same rtu_ppo.py trainer so the
-    # plasticity/grad-norm probes are collected). Lighter than the RTU, so
-    # --tasks could likely go to 10; kept at 5 to match the RTU and stay safe.
+    # Vanilla PPO baseline
     python scripts/slurm.py \
         --cluster clusters/vulcan-gpu-vmap-32G.json \
         --tasks 5 --time 06:00:00 --runs 30 --force \
         --entry src/rtu_ppo.py \
         -e experiments/E139-rtu-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11/${fov}/ActorCriticMLP.json
+
+    # RTU-PPO with ReLU activations at every layer (dormancy + persistent
+    # dormancy measured at each post-ReLU layer).
+    python scripts/slurm.py \
+        --cluster clusters/vulcan-gpu-vmap-32G.json \
+        --tasks 5 --time 06:00:00 --runs 30 --force \
+        --entry src/rtu_ppo.py \
+        -e experiments/E139-rtu-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11/${fov}/RealTimeActorCriticMLPReLU.json
 done
