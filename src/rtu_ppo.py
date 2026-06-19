@@ -125,6 +125,9 @@ class TrainConfig:
     compute_ntk: bool = struct.field(pytree_node=False)
     ntk_freq: int = struct.field(pytree_node=False)
     n_ref: int = struct.field(pytree_node=False)
+    # Row-chunk size for the memory-bounded NTK Gram build; result-invariant,
+    # trades peak memory against recompute.  Defaults to n_ref // 4.
+    chunked_ref: int = struct.field(pytree_node=False)
     # Weight-norm metric -- independent cadence / flag from the NTK metrics above
     compute_weight_norm: bool = struct.field(pytree_node=False)
     weight_norm_freq: int = struct.field(pytree_node=False)
@@ -1303,6 +1306,7 @@ def experiment(rng, config: TrainConfig):
                     x_ref,
                     action_dim,
                     reward_dim,
+                    config.chunked_ref,
                     compute_value=True,
                     compute_policy=True,
                 )
@@ -1455,10 +1459,10 @@ def experiment(rng, config: TrainConfig):
     # updates).  Kept at per-update resolution; consumers subsample as needed.
     (
         value_ntk_rank,
-        value_ntk_cond,
+        value_ntk_eff_rank,
         value_churn,
         policy_ntk_rank,
-        policy_ntk_cond,
+        policy_ntk_eff_rank,
         policy_churn,
     ) = ntk_metrics
     weight_drift_pi, weight_drift_vf, weight_drift_total = weight_drift_metric
@@ -1474,10 +1478,10 @@ def experiment(rng, config: TrainConfig):
         biome_rank,
         (
             value_ntk_rank,
-            value_ntk_cond,
+            value_ntk_eff_rank,
             value_churn,
             policy_ntk_rank,
-            policy_ntk_cond,
+            policy_ntk_eff_rank,
             policy_churn,
         ),
         weight_norm_metric,
@@ -1590,6 +1594,12 @@ def main():
         ntk_freq = int(hypers.get("experiment", {}).get("ntk_freq", 0))
         compute_ntk = ntk_freq > 0
         n_ref = int(hypers.get("experiment", {}).get("x_ref_steps", 128))
+        # Row-chunk size for the memory-bounded NTK Gram build; result-invariant,
+        # only trades peak memory against recompute.  Defaults to n_ref // 4.
+        chunked_ref = int(
+            hypers.get("experiment", {}).get("chunked_ref", max(n_ref // 4, 1))
+        )
+        chunked_ref = max(min(chunked_ref, n_ref), 1)
         # Weight norm: independent of the NTK metrics, controlled by its own
         # experiment.weight_norm_freq (env steps, rounded up to rollout_steps).
         weight_norm_freq = int(hypers.get("experiment", {}).get("weight_norm_freq", 0))
@@ -1709,6 +1719,7 @@ def main():
             compute_ntk=compute_ntk,
             ntk_freq=max(ntk_freq, 1),
             n_ref=n_ref,
+            chunked_ref=chunked_ref,
             compute_weight_norm=compute_weight_norm,
             weight_norm_freq=max(weight_norm_freq, 1),
             compute_weight_drift=compute_weight_drift,
@@ -1730,10 +1741,10 @@ def main():
         biome_rank,
         (
             value_ntk_rank,
-            value_ntk_cond,
+            value_ntk_eff_rank,
             value_churn,
             policy_ntk_rank,
-            policy_ntk_cond,
+            policy_ntk_eff_rank,
             policy_churn,
         ),
         weight_norm_metric,
@@ -1764,10 +1775,10 @@ def main():
         run_biome_regret = biome_regret[i]
         run_biome_rank = biome_rank[i]
         run_value_ntk_rank = value_ntk_rank[i]
-        run_value_ntk_cond = value_ntk_cond[i]
+        run_value_ntk_eff_rank = value_ntk_eff_rank[i]
         run_value_churn = value_churn[i]
         run_policy_ntk_rank = policy_ntk_rank[i]
-        run_policy_ntk_cond = policy_ntk_cond[i]
+        run_policy_ntk_eff_rank = policy_ntk_eff_rank[i]
         run_policy_churn = policy_churn[i]
         run_weight_norm = weight_norm_metric[i]
         run_weight_drift_pi = weight_drift_pi[i]
@@ -1818,10 +1829,10 @@ def main():
             biome_regret=run_biome_regret,
             biome_rank=run_biome_rank,
             value_ntk_rank=run_value_ntk_rank,
-            value_ntk_cond=run_value_ntk_cond,
+            value_ntk_eff_rank=run_value_ntk_eff_rank,
             value_churn=run_value_churn,
             policy_ntk_rank=run_policy_ntk_rank,
-            policy_ntk_cond=run_policy_ntk_cond,
+            policy_ntk_eff_rank=run_policy_ntk_eff_rank,
             policy_churn=run_policy_churn,
             weight_norm=run_weight_norm,
             weight_drift_pi=run_weight_drift_pi,
