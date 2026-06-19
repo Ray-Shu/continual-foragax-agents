@@ -191,8 +191,10 @@ class Interaction(NamedTuple):
 # Activation-aware probes captured during a rollout via Flax `sow` calls in
 # RealTimeACMLP. Probe sites and metrics:
 #   actor/critic_pre1, actor/critic_pre2  (pre-tanh)  → effective rank +
-#       saturation rate  E[ 1{|tanh(z)| > 0.95} ]  (tanh-aware analogue of
-#       Sokar dormancy; tanh's failure mode is saturation, not zeroing).
+#       saturation rate  E_units[ 1{ |E_states[tanh(z)]| > 0.95 } ]: fraction of
+#       units pinned to one rail across the probe set (constant / non-
+#       differentiating), the tanh analogue of Sokar dormancy. sat_persist is
+#       the same quantity with the per-unit mean EMA'd across rollouts.
 #   actor/critic_rtu_out  (post-ReLU)  → effective rank + Sokar τ-dormant
 #       fraction with τ = 0.025 (the regime Sokar 2023 was designed for).
 # Expectations are estimated as sample means over the rollout's collapsed
@@ -215,9 +217,16 @@ def _dormant_fraction(activation, threshold=0.025):
 
 
 def _saturation_rate(pre_activation, threshold=0.95):
-    # Assumes a tanh nonlinearity follows this probe site.
+    # Assumes a tanh nonlinearity follows this probe site. Signed
+    # average-then-threshold: per unit take the signed mean of tanh over the
+    # probe set (the rollout's states), then report the fraction of units whose
+    # |mean| exceeds the threshold -- units pinned to one rail across these
+    # states (constant / non-differentiating). This is the no-EMA, within-rollout
+    # counterpart of sat_persist, which applies the *same* per-unit signed mean
+    # (_mean_tanh_sites) but EMAs it across rollouts before thresholding.
     h = pre_activation.reshape(-1, pre_activation.shape[-1])
-    return jnp.mean(jnp.abs(jnp.tanh(h)) > threshold).astype(jnp.float32)
+    mean_tanh = jnp.mean(jnp.tanh(h), axis=0)
+    return jnp.mean(jnp.abs(mean_tanh) > threshold).astype(jnp.float32)
 
 
 def _compute_plasticity_metrics(params, apply_fn, init_hstate, traj_obs):
