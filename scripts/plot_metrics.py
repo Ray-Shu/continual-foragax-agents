@@ -9,12 +9,14 @@ Examples:
         -e experiments/X33-ForagaxSquareWaveTwoBiome-v11/foragax/ForagaxSquareWaveTwoBiome-v11 \
         -a PPO_LN_128 -f 9
 """
+
 import argparse
 import sys
 import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent  # Go up from scripts/ to repo root
@@ -26,7 +28,7 @@ def _normalize_exp(exp: str) -> str:
     exp = exp.strip().rstrip("/")
     for prefix in ("experiments/", "results/"):
         if exp.startswith(prefix):
-            exp = exp[len(prefix):]
+            exp = exp[len(prefix) :]
     return exp
 
 
@@ -67,24 +69,14 @@ def main():
 
     # Each panel lists every column that could supply it, paired with a series
     # label.  DQN runs write `churn_norm` / `ntk_rank` / `ntk_cond`; PPO runs write
-    # separate `value_*` / `policy_*` columns.  Only the columns actually present in
+    # separate `value_*` / `policy_*` columns (hard `*_ntk_rank` plus effective
+    # `*_ntk_eff_rank`, no condition number).  Only the columns actually present in
     # the loaded data are plotted, so this works unchanged for either agent (or a
     # mix), drawing one line per available series.
     # Panels are laid out on a grid by their `row`: row 0 holds the churn / NTK
     # metrics, row 1 holds the weight metrics.  Unused cells in a shorter row are
     # hidden.
     PANELS = [
-        {
-            "row": 0,
-            "ylabel": "Churn Norm",
-            "title": "Churn Over Time",
-            "log": False,
-            "series": [
-                ("churn_norm", "DQN"),
-                ("value_churn", "Critic (PPO)"),
-                ("policy_churn", "Actor (PPO)"),
-            ],
-        },
         {
             "row": 0,
             "ylabel": "NTK Rank",
@@ -103,8 +95,29 @@ def main():
             "log": True,  # condition numbers span many orders of magnitude
             "series": [
                 ("ntk_cond", "DQN"),
-                ("value_ntk_cond", "Critic (PPO)"),
-                ("policy_ntk_cond", "Actor (PPO)"),
+                ("value_ntk_cond", "Value (PPO)"),
+                ("policy_ntk_cond", "Policy (PPO)"),
+            ],
+        },
+        {
+            "row": 0,
+            "ylabel": "NTK Effective Rank",
+            "title": "NTK Effective (Stable) Rank Over Time",
+            "log": False,
+            "series": [
+                ("value_ntk_eff_rank", "Value (PPO)"),
+                ("policy_ntk_eff_rank", "Policy (PPO)"),
+            ],
+        },
+        {
+            "row": 1,
+            "ylabel": "Churn Norm",
+            "title": "Churn Over Time",
+            "log": False,
+            "series": [
+                ("churn_norm", "DQN"),
+                ("value_churn", "Value (PPO)"),
+                ("policy_churn", "Policy (PPO)"),
             ],
         },
         {
@@ -132,12 +145,12 @@ def main():
     print(f"Data path: {data_path}")
     print(f"Data path exists: {data_path.exists()}")
 
-    # Load the raw per-run npz files.  We read these directly (rather than via
-    # read_metrics_from_data) because the metrics are stored at their native
-    # resolution here: DQN writes one value per env step (NaN except every
-    # ntk_freq), while PPO writes one value per *update*.  The reader would repeat
-    # the PPO per-update arrays up to per-step length, which makes constant-valued
-    # series (e.g. NTK rank) indistinguishable from a single repeated point.
+    # Load the raw per-run npz files from the /data/ folder.  We read these directly
+    # (rather than via data.parquet) to access metrics at their native resolution:
+    # DQN writes one value per env step (NaN except every ntk_freq), while PPO
+    # writes one value per *update*.  The parquet reader would repeat PPO per-update
+    # arrays up to per-step length, which makes constant-valued series (e.g. NTK rank)
+    # indistinguishable from a single repeated point.
     runs = []
     for f in sorted(Path(data_path).glob("*.npz")):
         with np.load(f) as d:
@@ -161,7 +174,9 @@ def main():
             v = np.asarray(r[col], dtype=float).reshape(-1)
             if v.shape[0] == 0:
                 continue
-            base_len = r["rewards"].reshape(-1).shape[0] if "rewards" in r else v.shape[0]
+            base_len = (
+                r["rewards"].reshape(-1).shape[0] if "rewards" in r else v.shape[0]
+            )
             steps_per_point = base_len / v.shape[0]
             arrays.append(v)
 
@@ -227,11 +242,32 @@ def main():
                 ax.plot(x, y, marker="o", label=label)
                 n_plotted += 1
 
-            ax.set_xlabel("Step")
             ax.set_ylabel(panel["ylabel"])
             ax.set_title(panel["title"])
             if panel["log"] and n_plotted > 0:
                 ax.set_yscale("log")
+
+            # Format x-axis with dynamic scaling for readability
+            xlim = ax.get_xlim()
+            x_max = xlim[1]
+            if x_max > 0:
+                # Find the order of magnitude
+                magnitude = 10 ** int(np.floor(np.log10(x_max)))
+                # Determine appropriate power of 10 for scaling
+                scaled_max = x_max / magnitude
+                if scaled_max > 50:
+                    scale = magnitude * 10
+                    power = int(np.log10(scale))
+                else:
+                    scale = magnitude
+                    power = int(np.log10(scale))
+
+                # Format ticks with the scale
+                ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, p: f"{x/scale:.10g}"))
+                ax.set_xlabel(f"Time steps ($\\times 10^{{{power}}}$)")
+            else:
+                ax.set_xlabel("Step")
+
             # Legend only matters when multiple series share a panel (e.g. PPO
             # value vs policy); a single DQN line doesn't need one.
             if n_plotted > 1:
