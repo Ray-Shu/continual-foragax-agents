@@ -81,8 +81,8 @@ def main():
             "log": False,
             "series": [
                 ("churn_norm", "DQN"),
-                ("value_churn", "Value (PPO)"),
-                ("policy_churn", "Policy (PPO)"),
+                ("value_churn", "Critic (PPO)"),
+                ("policy_churn", "Actor (PPO)"),
             ],
         },
         {
@@ -92,8 +92,8 @@ def main():
             "log": False,
             "series": [
                 ("ntk_rank", "DQN"),
-                ("value_ntk_rank", "Value (PPO)"),
-                ("policy_ntk_rank", "Policy (PPO)"),
+                ("value_ntk_rank", "Critic (PPO)"),
+                ("policy_ntk_rank", "Actor (PPO)"),
             ],
         },
         {
@@ -103,8 +103,8 @@ def main():
             "log": True,  # condition numbers span many orders of magnitude
             "series": [
                 ("ntk_cond", "DQN"),
-                ("value_ntk_cond", "Value (PPO)"),
-                ("policy_ntk_cond", "Policy (PPO)"),
+                ("value_ntk_cond", "Critic (PPO)"),
+                ("policy_ntk_cond", "Actor (PPO)"),
             ],
         },
         {
