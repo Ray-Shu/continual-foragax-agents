@@ -16,6 +16,7 @@ import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent  # Go up from scripts/ to repo root
@@ -78,17 +79,6 @@ def main():
     PANELS = [
         {
             "row": 0,
-            "ylabel": "Churn Norm",
-            "title": "Churn Over Time",
-            "log": False,
-            "series": [
-                ("churn_norm", "DQN"),
-                ("value_churn", "Value (PPO)"),
-                ("policy_churn", "Policy (PPO)"),
-            ],
-        },
-        {
-            "row": 0,
             "ylabel": "NTK Rank",
             "title": "NTK Rank Over Time",
             "log": False,
@@ -96,6 +86,17 @@ def main():
                 ("ntk_rank", "DQN"),
                 ("value_ntk_rank", "Value (PPO)"),
                 ("policy_ntk_rank", "Policy (PPO)"),
+            ],
+        },
+        {
+            "row": 0,
+            "ylabel": "NTK Condition Number",
+            "title": "NTK Condition Number Over Time",
+            "log": True,  # condition numbers span many orders of magnitude
+            "series": [
+                ("ntk_cond", "DQN"),
+                ("value_ntk_cond", "Value (PPO)"),
+                ("policy_ntk_cond", "Policy (PPO)"),
             ],
         },
         {
@@ -109,12 +110,14 @@ def main():
             ],
         },
         {
-            "row": 0,
-            "ylabel": "NTK Condition Number",
-            "title": "NTK Condition Number Over Time",
-            "log": True,  # condition numbers span many orders of magnitude
+            "row": 1,
+            "ylabel": "Churn Norm",
+            "title": "Churn Over Time",
+            "log": False,
             "series": [
-                ("ntk_cond", "DQN"),
+                ("churn_norm", "DQN"),
+                ("value_churn", "Value (PPO)"),
+                ("policy_churn", "Policy (PPO)"),
             ],
         },
         {
@@ -142,12 +145,12 @@ def main():
     print(f"Data path: {data_path}")
     print(f"Data path exists: {data_path.exists()}")
 
-    # Load the raw per-run npz files.  We read these directly (rather than via
-    # read_metrics_from_data) because the metrics are stored at their native
-    # resolution here: DQN writes one value per env step (NaN except every
-    # ntk_freq), while PPO writes one value per *update*.  The reader would repeat
-    # the PPO per-update arrays up to per-step length, which makes constant-valued
-    # series (e.g. NTK rank) indistinguishable from a single repeated point.
+    # Load the raw per-run npz files from the /data/ folder.  We read these directly
+    # (rather than via data.parquet) to access metrics at their native resolution:
+    # DQN writes one value per env step (NaN except every ntk_freq), while PPO
+    # writes one value per *update*.  The parquet reader would repeat PPO per-update
+    # arrays up to per-step length, which makes constant-valued series (e.g. NTK rank)
+    # indistinguishable from a single repeated point.
     runs = []
     for f in sorted(Path(data_path).glob("*.npz")):
         with np.load(f) as d:
@@ -239,11 +242,32 @@ def main():
                 ax.plot(x, y, marker="o", label=label)
                 n_plotted += 1
 
-            ax.set_xlabel("Step")
             ax.set_ylabel(panel["ylabel"])
             ax.set_title(panel["title"])
             if panel["log"] and n_plotted > 0:
                 ax.set_yscale("log")
+
+            # Format x-axis with dynamic scaling for readability
+            xlim = ax.get_xlim()
+            x_max = xlim[1]
+            if x_max > 0:
+                # Find the order of magnitude
+                magnitude = 10 ** int(np.floor(np.log10(x_max)))
+                # Determine appropriate power of 10 for scaling
+                scaled_max = x_max / magnitude
+                if scaled_max > 50:
+                    scale = magnitude * 10
+                    power = int(np.log10(scale))
+                else:
+                    scale = magnitude
+                    power = int(np.log10(scale))
+
+                # Format ticks with the scale
+                ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, p: f"{x/scale:.10g}"))
+                ax.set_xlabel(f"Time steps ($\\times 10^{{{power}}}$)")
+            else:
+                ax.set_xlabel("Step")
+
             # Legend only matters when multiple series share a panel (e.g. PPO
             # value vs policy); a single DQN line doesn't need one.
             if n_plotted > 1:

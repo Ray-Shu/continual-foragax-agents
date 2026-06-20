@@ -1460,9 +1460,11 @@ def experiment(rng, config: TrainConfig):
     (
         value_ntk_rank,
         value_ntk_eff_rank,
+        value_ntk_cond,
         value_churn,
         policy_ntk_rank,
         policy_ntk_eff_rank,
+        policy_ntk_cond,
         policy_churn,
     ) = ntk_metrics
     weight_drift_pi, weight_drift_vf, weight_drift_total = weight_drift_metric
@@ -1479,9 +1481,11 @@ def experiment(rng, config: TrainConfig):
         (
             value_ntk_rank,
             value_ntk_eff_rank,
+            value_ntk_cond,
             value_churn,
             policy_ntk_rank,
             policy_ntk_eff_rank,
+            policy_ntk_cond,
             policy_churn,
         ),
         weight_norm_metric,
@@ -1742,9 +1746,11 @@ def main():
         (
             value_ntk_rank,
             value_ntk_eff_rank,
+            value_ntk_cond,
             value_churn,
             policy_ntk_rank,
             policy_ntk_eff_rank,
+            policy_ntk_cond,
             policy_churn,
         ),
         weight_norm_metric,
@@ -1776,9 +1782,11 @@ def main():
         run_biome_rank = biome_rank[i]
         run_value_ntk_rank = value_ntk_rank[i]
         run_value_ntk_eff_rank = value_ntk_eff_rank[i]
+        run_value_ntk_cond = value_ntk_cond[i]
         run_value_churn = value_churn[i]
         run_policy_ntk_rank = policy_ntk_rank[i]
         run_policy_ntk_eff_rank = policy_ntk_eff_rank[i]
+        run_policy_ntk_cond = policy_ntk_cond[i]
         run_policy_churn = policy_churn[i]
         run_weight_norm = weight_norm_metric[i]
         run_weight_drift_pi = weight_drift_pi[i]
@@ -1830,9 +1838,11 @@ def main():
             biome_rank=run_biome_rank,
             value_ntk_rank=run_value_ntk_rank,
             value_ntk_eff_rank=run_value_ntk_eff_rank,
+            value_ntk_cond=run_value_ntk_cond,
             value_churn=run_value_churn,
             policy_ntk_rank=run_policy_ntk_rank,
             policy_ntk_eff_rank=run_policy_ntk_eff_rank,
+            policy_ntk_cond=run_policy_ntk_cond,
             policy_churn=run_policy_churn,
             weight_norm=run_weight_norm,
             weight_drift_pi=run_weight_drift_pi,

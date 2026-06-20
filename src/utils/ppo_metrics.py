@@ -177,8 +177,8 @@ def _gram_chunked(
     return blocks.transpose(0, 2, 1, 3).reshape(n_rows, n_rows)
 
 
-def _ntk_rank_eff(ntk: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Discrete (hard) NTK rank and effective (stable) rank from the Gram matrix.
+def _ntk_rank_eff_cond(ntk: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Discrete (hard) NTK rank, effective (stable) rank, and condition number from the Gram matrix.
 
     ``ntk = J Jᵀ`` is symmetric positive-semidefinite, so a single symmetric
     eigendecomposition (``eigvalsh``) gives every spectral quantity we need --
@@ -193,6 +193,8 @@ def _ntk_rank_eff(ntk: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
       energy.  It equals the hard rank only for a perfectly flat spectrum and is
       otherwise smaller; the gap reveals spectral concentration that the integer
       rank cannot.
+    * **condition number** -- the ratio ``λ_max / λ_min`` of the largest to
+      smallest nonzero eigenvalue, measuring how well-conditioned the Gram is.
     """
     eigvals = jnp.clip(jnp.linalg.eigvalsh(ntk), a_min=0.0)  # ascending, PSD
     lam_max = eigvals[-1]
@@ -202,7 +204,12 @@ def _ntk_rank_eff(ntk: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
     eff_rank = jnp.where(lam_max > 0, jnp.sum(eigvals) / lam_max, 0.0).astype(
         jnp.float32
     )
-    return rank, eff_rank
+    above_tol = eigvals > tol
+    lam_min = jnp.where(jnp.any(above_tol), jnp.min(jnp.where(above_tol, eigvals, jnp.inf)), 1.0)
+    cond = jnp.where(
+        jnp.logical_and(lam_max > 0, lam_min > 0), lam_max / lam_min, 0.0
+    ).astype(jnp.float32)
+    return rank, eff_rank, cond
 
 
 def value_metrics(
@@ -214,8 +221,8 @@ def value_metrics(
     action_dim: int,
     reward_dim: int,
     chunk: int,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """NTK rank / effective rank and per-update churn for the value head.
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """NTK rank / effective rank / condition number and per-update churn for the value head.
 
     NTK is measured on the post-update parameters (the network's current state,
     matching the DQN convention).  Churn is the norm of the value change on
@@ -224,7 +231,7 @@ def value_metrics(
     / speed, not the result.
 
     Returns:
-        ``(rank, eff_rank, churn)`` as scalar arrays.
+        ``(rank, eff_rank, cond, churn)`` as scalar arrays.
     """
 
     def value_of(params, x):
@@ -238,7 +245,7 @@ def value_metrics(
 
     # NTK on the current (post-update) params; Gram built in row-chunks.
     ntk = _gram_chunked(value_of, params_after, x_ref, chunk, m=1)
-    rank, eff_rank = _ntk_rank_eff(ntk)
+    rank, eff_rank, cond = _ntk_rank_eff_cond(ntk)
     churn_numerator = jnp.linalg.norm(pred_after - pred_before)
 
     # Gradient-norm aggregate ||J||_F = sqrt(trace(J Jᵀ)) -- read straight off the
@@ -258,7 +265,7 @@ def value_metrics(
     eps = 1e-8
     churn = churn_numerator / (grad_norm_aggregate * weight_update_norm + eps)
 
-    return rank, eff_rank, churn
+    return rank, eff_rank, cond, churn
 
 
 def policy_metrics(
@@ -270,8 +277,8 @@ def policy_metrics(
     action_dim: int,
     reward_dim: int,
     chunk: int,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """NTK rank / effective rank and per-update churn for the policy head.
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """NTK rank / effective rank / condition number and per-update churn for the policy head.
 
     The policy output is the ``action_dim`` logit vector, so the Jacobian has
     ``n_ref * action_dim`` rows (and the rank ceiling is correspondingly
@@ -282,7 +289,7 @@ def policy_metrics(
     / speed, not the result.
 
     Returns:
-        ``(rank, eff_rank, churn)`` as scalar arrays.
+        ``(rank, eff_rank, cond, churn)`` as scalar arrays.
     """
 
     def logits_of(params, x):
@@ -302,7 +309,7 @@ def policy_metrics(
     # NTK on the current (post-update) params; Gram built in row-chunks, each
     # sample contributing action_dim rows.
     ntk = _gram_chunked(logits_of, params_after, x_ref, chunk, m=action_dim)
-    rank, eff_rank = _ntk_rank_eff(ntk)
+    rank, eff_rank, cond = _ntk_rank_eff_cond(ntk)
 
     # Gradient-norm aggregate ||J||_F = sqrt(trace(J Jᵀ)) -- read straight off the
     # Gram diagonal, so the full Jacobian is never materialized.
@@ -321,7 +328,7 @@ def policy_metrics(
     eps = 1e-8
     churn = churn_numerator / (grad_norm_aggregate * weight_update_norm + eps)
 
-    return rank, eff_rank, churn
+    return rank, eff_rank, cond, churn
 
 
 def compute_ppo_metrics(
@@ -358,13 +365,13 @@ def compute_ppo_metrics(
         compute_policy: Whether to measure the policy head.
 
     Returns:
-        ``(value_rank, value_eff_rank, value_churn, policy_rank, policy_eff_rank,
-        policy_churn)`` as scalar arrays.
+        ``(value_rank, value_eff_rank, value_cond, value_churn, policy_rank,
+        policy_eff_rank, policy_cond, policy_churn)`` as scalar arrays.
     """
     nan = jnp.float32(jnp.nan)
 
     if compute_value:
-        v_rank, v_eff_rank, v_churn = value_metrics(
+        v_rank, v_eff_rank, v_cond, v_churn = value_metrics(
             apply_fn,
             params_before,
             params_after,
@@ -375,10 +382,10 @@ def compute_ppo_metrics(
             chunk,
         )
     else:
-        v_rank, v_eff_rank, v_churn = nan, nan, nan
+        v_rank, v_eff_rank, v_cond, v_churn = nan, nan, nan, nan
 
     if compute_policy:
-        p_rank, p_eff_rank, p_churn = policy_metrics(
+        p_rank, p_eff_rank, p_cond, p_churn = policy_metrics(
             apply_fn,
             params_before,
             params_after,
@@ -389,12 +396,12 @@ def compute_ppo_metrics(
             chunk,
         )
     else:
-        p_rank, p_eff_rank, p_churn = nan, nan, nan
+        p_rank, p_eff_rank, p_cond, p_churn = nan, nan, nan, nan
 
-    return v_rank, v_eff_rank, v_churn, p_rank, p_eff_rank, p_churn
+    return v_rank, v_eff_rank, v_cond, v_churn, p_rank, p_eff_rank, p_cond, p_churn
 
 
 def nan_ppo_metrics() -> Tuple[jnp.ndarray, ...]:
     """The all-``NaN`` NTK / churn metric tuple emitted on non-metric updates."""
     nan = jnp.float32(jnp.nan)
-    return nan, nan, nan, nan, nan, nan
+    return nan, nan, nan, nan, nan, nan, nan, nan
