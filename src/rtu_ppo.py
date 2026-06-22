@@ -37,7 +37,6 @@ from algorithms.nn.RealTimeACConvHint import RealTimeActorCriticConvHint
 from algorithms.nn.RealTimeACConvHintRTU import RealTimeActorCriticConvHintRTU
 from algorithms.nn.RealTimeACConvPooling import RealTimeActorCriticConvPooling
 from algorithms.nn.RealTimeACMLP import RealTimeActorCriticMLP
-from algorithms.nn.RealTimeACMLPReLU import RealTimeActorCriticMLPReLU
 from algorithms.nn.RealTimeACMLPMulti import RealTimeActorCriticMLPMulti
 from algorithms.PPORegistry import getAgent
 from experiment import ExperimentModel
@@ -201,6 +200,25 @@ class Interaction(NamedTuple):
 # Expectations are estimated as sample means over the rollout's collapsed
 # (T·B, H) activation matrix — Monte Carlo for E_{x∼D_rollout}.
 # ----------------------------------------------------------------------------
+def _agent_is_relu(agent_type):
+    """ReLU-activation variant of an MLP/RTU agent (e.g. RealTimeActorCriticMLPReLU,
+    ActorCriticMLPReLU). The activation is encoded in the agent name; the net
+    class is shared with the tanh counterpart."""
+    return agent_type.endswith("ReLU")
+
+
+def _agent_is_rtu(agent_type):
+    """Recurrent (RTU) MLP agent vs the feedforward vanilla MLP."""
+    return agent_type.startswith("RealTime")
+
+
+def _relu_wide_intermediate(agent_type):
+    """Name of the sown intermediate for the wide middle layer of a ReLU net:
+    the RTU output for the recurrent net, the wide Dense ('mid') for the MLP.
+    Both are emitted into the unified '*_rtu' metric column."""
+    return "rtu_out" if _agent_is_rtu(agent_type) else "mid"
+
+
 def _effective_rank(activation):
     h = activation.reshape(-1, activation.shape[-1]).astype(jnp.float32)
     h = h - jnp.mean(h, axis=0, keepdims=True)
@@ -297,15 +315,20 @@ def _compute_plasticity_metrics_mlp(params, apply_fn, init_hstate, traj_obs):
     }
 
 
-def _compute_plasticity_metrics_relu(params, apply_fn, init_hstate, traj_obs):
-    """ReLU RTU variant metrics dict: effective rank AND Sokar dormant fraction
-    at every (post-ReLU) probe site -- pre1, rtu, pre2. No tanh saturation (this
-    net has no tanh)."""
+def _compute_plasticity_metrics_relu(params, apply_fn, init_hstate, traj_obs,
+                                     wide_inter="rtu_out"):
+    """ReLU variant metrics dict: effective rank AND Sokar dormant fraction at
+    every (post-ReLU) probe site -- pre1, the wide middle layer, pre2. No tanh
+    saturation (this net has no tanh). The wide-layer activations come from
+    `wide_inter` (the RTU output for the recurrent net, the wide Dense 'mid' for
+    the feedforward MLP) but are emitted into the unified '*_rtu' column so the
+    plotting layer set is architecture-independent."""
     _, state = apply_fn(params, init_hstate, traj_obs, mutable=["intermediates"])
     inter = state["intermediates"]
     sites = {
         "actor_pre1": inter["actor_pre1"][0], "critic_pre1": inter["critic_pre1"][0],
-        "actor_rtu": inter["actor_rtu_out"][0], "critic_rtu": inter["critic_rtu_out"][0],
+        "actor_rtu": inter[f"actor_{wide_inter}"][0],
+        "critic_rtu": inter[f"critic_{wide_inter}"][0],
         "actor_pre2": inter["actor_pre2"][0], "critic_pre2": inter["critic_pre2"][0],
     }
     out = {}
@@ -337,14 +360,17 @@ def _mean_tanh_sites(params, apply_fn, init_hstate, traj_obs):
     }
 
 
-def _mean_abs_act_sites(params, apply_fn, init_hstate, traj_obs):
-    """Per-unit mean |activation| at the post-ReLU sites (pre1/rtu/pre2), as a
-    dict {site: (width,) vector}; feeds the persistent-dormancy EMA."""
+def _mean_abs_act_sites(params, apply_fn, init_hstate, traj_obs,
+                        wide_inter="rtu_out"):
+    """Per-unit mean |activation| at the post-ReLU sites (pre1/wide/pre2), as a
+    dict {site: (width,) vector}; feeds the persistent-dormancy EMA. The wide
+    site reads `wide_inter` (RTU output or MLP 'mid') under the unified 'rtu'
+    key."""
     _, state = apply_fn(params, init_hstate, traj_obs, mutable=["intermediates"])
     inter = state["intermediates"]
     names = {
         "actor_pre1": "actor_pre1", "critic_pre1": "critic_pre1",
-        "actor_rtu": "actor_rtu_out", "critic_rtu": "critic_rtu_out",
+        "actor_rtu": f"actor_{wide_inter}", "critic_rtu": f"critic_{wide_inter}",
         "actor_pre2": "actor_pre2", "critic_pre2": "critic_pre2",
     }
 
@@ -380,11 +406,12 @@ def _pers_ema_init(config):
     tanh nets track pre1/pre2 (hidden_size); the ReLU net also tracks the RTU
     output (2*d_hidden). Empty for agents without probes."""
     H = config.hidden_size
-    if config.agent_type == "RealTimeActorCriticMLPReLU":
-        R = 2 * config.d_hidden
+    if _agent_is_relu(config.agent_type):
+        # wide middle layer: RTU output (2*d_hidden) or the MLP wide Dense (d_hidden)
+        wide = 2 * config.d_hidden if _agent_is_rtu(config.agent_type) else config.d_hidden
         return {
             "actor_pre1": jnp.zeros(H), "critic_pre1": jnp.zeros(H),
-            "actor_rtu": jnp.zeros(R), "critic_rtu": jnp.zeros(R),
+            "actor_rtu": jnp.zeros(wide), "critic_rtu": jnp.zeros(wide),
             "actor_pre2": jnp.zeros(H), "critic_pre2": jnp.zeros(H),
         }
     if config.agent_type in ("RealTimeActorCriticMLP", "ActorCriticMLP"):
@@ -957,10 +984,12 @@ def experiment(rng, config: TrainConfig):
 
     # Create and initialize the network. `agent` is dynamically dispatched via
     # getAgent(config.agent_type); pyright sees only the base type so it can't
-    # verify variant-specific kwargs like use_layernorm.
+    # verify variant-specific kwargs like use_layernorm. The ReLU variants share
+    # the tanh class; the activation is selected here from the agent name.
+    _activation = "relu" if _agent_is_relu(config.agent_type) else "tanh"
     network = agent(
         action_dim=action_dim,
-        activation="tanh",
+        activation=_activation,
         hidden_size=config.hidden_size,
         d_hidden=config.d_hidden,
         cont=False,
@@ -996,7 +1025,7 @@ def experiment(rng, config: TrainConfig):
         RealTimeActorCriticConvHint,
     )
     _is_conv_hint_rtu = _agent_class is RealTimeActorCriticConvHintRTU
-    _is_mlp_rtu = _agent_class in (RealTimeActorCriticMLP, RealTimeActorCriticMLPReLU, RealTimeActorCriticMLPMulti, ActorCriticMLP)
+    _is_mlp_rtu = _agent_class in (RealTimeActorCriticMLP, RealTimeActorCriticMLPMulti, ActorCriticMLP)
     if _is_conv_rtu:
         # RTU receives hidden_size-wide embedding; action/reward/hint folded in before the Dense
         d_input = config.hidden_size
@@ -1345,21 +1374,35 @@ def experiment(rng, config: TrainConfig):
         # activations match what the rollout actually saw. Guarded statically on
         # agent_type; each agent returns a {column_name: scalar} plasticity dict.
         _pp = (train_state.params, train_state.apply_fn, hstate, traj_batch.obs)
-        if config.agent_type == "RealTimeActorCriticMLP":
+        _at = config.agent_type
+        if _agent_is_relu(_at):
+            # all-ReLU net (RTU or MLP): dormancy + effective rank at every
+            # post-ReLU site. The wide middle layer is read from the RTU output
+            # or the MLP's wide Dense, emitted into the unified '*_rtu' column.
+            plasticity = _compute_plasticity_metrics_relu(
+                *_pp, wide_inter=_relu_wide_intermediate(_at)
+            )
+        elif _at == "RealTimeActorCriticMLP":
             plasticity = _compute_plasticity_metrics(*_pp)
-        elif config.agent_type == "ActorCriticMLP":
+        elif _at == "ActorCriticMLP":
             plasticity = _compute_plasticity_metrics_mlp(*_pp)
-        elif config.agent_type == "RealTimeActorCriticMLPReLU":
-            plasticity = _compute_plasticity_metrics_relu(*_pp)
         else:
             plasticity = _zero_plasticity_metrics()
 
         # Persistent metric. Per rollout take the per-unit mean (signed tanh for
-        # the tanh nets, |activation| for the ReLU net), EMA it across rollouts
+        # the tanh nets, |activation| for the ReLU nets), EMA it across rollouts
         # (decay sat_persist_decay) in the pers_ema dict carry, then threshold
         # AFTER the EMA: persistent saturation (|EMA| > 0.95) or persistent
         # dormancy (Sokar score <= 0.025). Empty for agents without probes.
-        if config.agent_type in ("RealTimeActorCriticMLP", "ActorCriticMLP"):
+        if _agent_is_relu(_at):
+            means = _mean_abs_act_sites(*_pp, wide_inter=_relu_wide_intermediate(_at))
+            pers_ema = {
+                k: config.sat_persist_decay * pers_ema[k]
+                + (1.0 - config.sat_persist_decay) * means[k]
+                for k in means
+            }
+            persist = _dormant_persist_from_ema(pers_ema, 0.025)
+        elif _at in ("RealTimeActorCriticMLP", "ActorCriticMLP"):
             means = _mean_tanh_sites(*_pp)
             pers_ema = {
                 k: config.sat_persist_decay * pers_ema[k]
@@ -1367,14 +1410,6 @@ def experiment(rng, config: TrainConfig):
                 for k in means
             }
             persist = _sat_persist_from_ema(pers_ema, config.sat_persist_threshold)
-        elif config.agent_type == "RealTimeActorCriticMLPReLU":
-            means = _mean_abs_act_sites(*_pp)
-            pers_ema = {
-                k: config.sat_persist_decay * pers_ema[k]
-                + (1.0 - config.sat_persist_decay) * means[k]
-                for k in means
-            }
-            persist = _dormant_persist_from_ema(pers_ema, 0.025)
         else:
             persist = {}
         metrics = {**plasticity, **persist}

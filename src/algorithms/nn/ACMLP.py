@@ -16,6 +16,19 @@ class ActorCriticMLP(nn.Module):
     use_reward_trace: bool = False
     use_layernorm: bool = False
 
+    def _sow_act(self, x, name, activation):
+        """Apply the layer activation and sow the plasticity probe at the site
+        matching the nonlinearity: tanh sows PRE-activation (saturation is a
+        pre-tanh notion), relu sows POST-activation (dormancy is on the unit
+        outputs). Returns the activated tensor."""
+        if self.activation == "relu":
+            x = activation(x)
+            self.sow("intermediates", name, x)
+        else:
+            self.sow("intermediates", name, x)
+            x = activation(x)
+        return x
+
     @nn.compact
     def __call__(self, hidden, obs):
         """
@@ -48,9 +61,8 @@ class ActorCriticMLP(nn.Module):
         )(obs)
         if self.use_layernorm:
             actor_embedding = nn.LayerNorm(name="actor_layernorm1")(actor_embedding)
-        # Pre-tanh probe (see plasticity-metric probes in rtu_ppo.py).
-        self.sow("intermediates", "actor_pre1", actor_embedding)
-        actor_embedding = activation(actor_embedding)
+        # Plasticity probe (pre-tanh for tanh, post-ReLU for relu).
+        actor_embedding = self._sow_act(actor_embedding, "actor_pre1", activation)
         actor_embedding = jnp.concatenate(
             (actor_embedding, last_action_encoded, last_reward_plus), axis=-1
         )
@@ -63,8 +75,7 @@ class ActorCriticMLP(nn.Module):
         )(obs)
         if self.use_layernorm:
             critic_embedding = nn.LayerNorm(name="critic_layernorm1")(critic_embedding)
-        self.sow("intermediates", "critic_pre1", critic_embedding)
-        critic_embedding = activation(critic_embedding)
+        critic_embedding = self._sow_act(critic_embedding, "critic_pre1", activation)
         critic_embedding = jnp.concatenate(
             (critic_embedding, last_action_encoded, last_reward_plus), axis=-1
         )
@@ -81,9 +92,13 @@ class ActorCriticMLP(nn.Module):
             bias_init=constant(0.0),
             name="critic_dense2",
         )(critic_embedding)
-        # Wide (d_hidden) layer occupying the RTU's position, but linear: this
-        # MLP has no nonlinearity between dense2 and dense3. Probed for effective
-        # rank (and a near-zero-output fraction in lieu of ReLU dormancy).
+        # Wide (d_hidden) layer occupying the RTU's position. For tanh it is
+        # LINEAR (no nonlinearity between dense2 and dense3) -> probed for
+        # effective rank only. For relu it is ReLU'd here so Sokar dormancy is
+        # measurable at this site too (full parallel to the all-ReLU RTU net).
+        if self.activation == "relu":
+            actor_embedding = activation(actor_embedding)
+            critic_embedding = activation(critic_embedding)
         self.sow("intermediates", "actor_mid", actor_embedding)
         self.sow("intermediates", "critic_mid", critic_embedding)
 
@@ -95,8 +110,7 @@ class ActorCriticMLP(nn.Module):
         )(actor_embedding)
         if self.use_layernorm:
             actor_mean = nn.LayerNorm(name="actor_layernorm2")(actor_mean)
-        self.sow("intermediates", "actor_pre2", actor_mean)
-        actor_mean = activation(actor_mean)
+        actor_mean = self._sow_act(actor_mean, "actor_pre2", activation)
         actor_mean = nn.Dense(
             self.action_dim,
             kernel_init=orthogonal(0.01),
@@ -120,8 +134,7 @@ class ActorCriticMLP(nn.Module):
         )(critic_embedding)
         if self.use_layernorm:
             critic = nn.LayerNorm(name="critic_layernorm2")(critic)
-        self.sow("intermediates", "critic_pre2", critic)
-        critic = activation(critic)
+        critic = self._sow_act(critic, "critic_pre2", activation)
         critic = nn.Dense(
             1, kernel_init=orthogonal(1.0), bias_init=constant(0.0), name="critic_value"
         )(critic)

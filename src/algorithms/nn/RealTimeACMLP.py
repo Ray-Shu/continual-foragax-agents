@@ -18,6 +18,23 @@ class RealTimeActorCriticMLP(nn.Module):
     use_reward_trace: bool = False
     use_layernorm: bool = False
 
+    def _sow_act(self, x, name, activation):
+        """Apply the layer activation and sow the plasticity probe at the site
+        that matches the nonlinearity:
+          - tanh: sow PRE-activation (saturation is a pre-tanh notion; the
+            saturation metric re-applies tanh to this), then activate.
+          - relu: activate first, then sow POST-activation (Sokar dormancy is
+            measured on the actual unit outputs).
+        Returns the activated tensor. This makes the single class reproduce the
+        former tanh and ReLU variants exactly."""
+        if self.activation == "relu":
+            x = activation(x)
+            self.sow("intermediates", name, x)
+        else:
+            self.sow("intermediates", name, x)
+            x = activation(x)
+        return x
+
     @nn.compact
     def __call__(self, hidden, obs):
         """
@@ -59,10 +76,9 @@ class RealTimeActorCriticMLP(nn.Module):
         )(obs)
         if self.use_layernorm:
             actor_embedding = nn.LayerNorm(name="actor_layernorm1")(actor_embedding)
-        # Sow pre-tanh activations for the plasticity-metric probe.
+        # Plasticity-metric probe (pre-tanh for tanh, post-ReLU for relu).
         # No-op unless apply() is called with mutable=['intermediates'].
-        self.sow("intermediates", "actor_pre1", actor_embedding)
-        actor_embedding = activation(actor_embedding)
+        actor_embedding = self._sow_act(actor_embedding, "actor_pre1", activation)
         actor_embedding = jnp.concatenate(
             (actor_embedding, last_action_encoded, last_reward_plus), axis=-1
         )
@@ -76,8 +92,7 @@ class RealTimeActorCriticMLP(nn.Module):
         )(obs)
         if self.use_layernorm:
             critic_embedding = nn.LayerNorm(name="critic_layernorm1")(critic_embedding)
-        self.sow("intermediates", "critic_pre1", critic_embedding)
-        critic_embedding = activation(critic_embedding)
+        critic_embedding = self._sow_act(critic_embedding, "critic_pre1", activation)
         critic_embedding = jnp.concatenate(
             (critic_embedding, last_action_encoded, last_reward_plus), axis=-1
         )
@@ -102,8 +117,7 @@ class RealTimeActorCriticMLP(nn.Module):
         actor_mean = nn.Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0), name="actor_dense2")(actor_embedding)
         if self.use_layernorm:
             actor_mean = nn.LayerNorm(epsilon=1e-05, name="actor_layernorm2")(actor_mean)
-        self.sow("intermediates", "actor_pre2", actor_mean)
-        actor_mean = activation(actor_mean)
+        actor_mean = self._sow_act(actor_mean, "actor_pre2", activation)
         actor_mean = nn.Dense(
             self.action_dim,
             kernel_init=orthogonal(0.01),
@@ -127,8 +141,7 @@ class RealTimeActorCriticMLP(nn.Module):
         )(critic_embedding)
         if self.use_layernorm:
             critic = nn.LayerNorm(name="critic_layernorm2")(critic)
-        self.sow("intermediates", "critic_pre2", critic)
-        critic = activation(critic)
+        critic = self._sow_act(critic, "critic_pre2", activation)
         critic = nn.Dense(
             1, kernel_init=orthogonal(1.0), bias_init=constant(0.0), name="critic_value"
         )(critic)

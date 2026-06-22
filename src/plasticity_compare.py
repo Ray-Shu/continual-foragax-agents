@@ -106,11 +106,17 @@ def _parquet_path(experiment_path: Path) -> Path:
 
 
 def _is_vanilla(agent: str) -> bool:
+    """Tanh feedforward MLP (linear wide layer). The ReLU MLP is NOT vanilla."""
     return agent == "ActorCriticMLP"
 
 
+def _is_rtu(agent: str) -> bool:
+    return agent.startswith("RealTime")
+
+
 def _is_relu(agent: str) -> bool:
-    return agent == "RealTimeActorCriticMLPReLU"
+    """ReLU-activation variant of either architecture (RTU or MLP)."""
+    return agent.endswith("ReLU")
 
 
 def _layer_widths(experiment_path: Path, agent: str) -> dict:
@@ -120,9 +126,12 @@ def _layer_widths(experiment_path: Path, agent: str) -> dict:
     The "rtu" slot differs by architecture:
       - RTU: nonlinear+recurrent output of width 2*d_hidden, which it can actually
         fill, so we normalize by that width.
-      - vanilla ActorCriticMLP: a *linear* Dense(d_hidden) whose rank is capped by
-        the upstream ~hidden-wide bottleneck, NOT by its 512 width. Dividing by
-        512 would fabricate a collapse, so we return None -> plot raw rank there.
+      - vanilla (tanh) ActorCriticMLP: a *linear* Dense(d_hidden) whose rank is
+        capped by the upstream ~hidden-wide bottleneck, NOT by its 512 width.
+        Dividing by 512 would fabricate a collapse, so we return None -> plot raw
+        rank there.
+      - ReLU ActorCriticMLP: the wide Dense(d_hidden) is ReLU'd, so it can fill
+        its own width -> normalize by d_hidden (NOT 2*d_hidden).
     Reads hidden/d_hidden from any config json; falls back to E139 defaults.
     """
     hidden, d_hidden = 64, 512
@@ -134,7 +143,12 @@ def _layer_widths(experiment_path: Path, agent: str) -> dict:
             break
         except (KeyError, json.JSONDecodeError, OSError):
             continue
-    rtu_denom = None if _is_vanilla(agent) else 2 * d_hidden
+    if _is_rtu(agent):
+        rtu_denom = 2 * d_hidden  # RTU output width (tanh or relu)
+    elif _is_relu(agent):
+        rtu_denom = d_hidden  # ReLU'd wide Dense fills its own width
+    else:
+        rtu_denom = None  # vanilla tanh MLP: linear wide layer, plot raw rank
     return {"pre1": hidden, "pre2": hidden, "rtu": rtu_denom}
 
 
@@ -142,10 +156,12 @@ def _layer_titles(agent: str) -> dict:
     """Architecture-aware panel titles. The pre1/pre2 sites are pre-tanh in the
     tanh nets and post-ReLU in the all-ReLU net; the wide slot is the linear
     Dense for vanilla, else the RTU output."""
-    if _is_vanilla(agent):
-        mid = "Wide layer (linear)"
-    else:
+    if _is_rtu(agent):
         mid = "RTU output"
+    elif _is_relu(agent):
+        mid = "Wide layer (ReLU)"
+    else:
+        mid = "Wide layer (linear)"
     if _is_relu(agent):
         return {"pre1": "ReLU 1", "pre2": "ReLU 2", "rtu": mid}
     return {"pre1": "Pre-tanh 1", "pre2": "Pre-tanh 2", "rtu": mid}
