@@ -15,9 +15,10 @@ SWITCHES=$(seq -f "%.0f" 250000 250000 9750000)
 # comparison; the per-alg plasticity figures go in plots/<alg>/ below.
 python src/learning_curve.py "$EXP" \
     --metrics ewm_reward \
-    --filter-alg-apertures RealTimeActorCriticMLP:9 ActorCriticMLP:9 RealTimeActorCriticMLPReLU:9 \
+    --filter-alg-apertures RealTimeActorCriticMLP:9 ActorCriticMLP:9 RealTimeActorCriticMLPReLU:9 ActorCriticMLPReLU:9 \
     --end-frame 10000000 \
-    --vertical-lines $SWITCHES
+    --vertical-lines $SWITCHES \
+    --legend
 
 # Per-layer plasticity plots, one algorithm at a time so the figures land in
 # separate plots/<agent>/ folders (an agent with no data yet is skipped):
@@ -28,7 +29,7 @@ python src/learning_curve.py "$EXP" \
 #   - fold-overlay: the same fold at early/mid/late windows, exposing how the
 #                   transient changes over training (plasticity loss).
 # Biomes are symmetric, so switches are folded together on the 250k half-period.
-for alg in RealTimeActorCriticMLP ActorCriticMLP RealTimeActorCriticMLPReLU; do
+for alg in RealTimeActorCriticMLP ActorCriticMLP RealTimeActorCriticMLPReLU ActorCriticMLPReLU; do
     python src/plasticity_compare.py "$EXP" --alg "$alg"
     python src/plasticity_compare.py "$EXP" --alg "$alg" --mode fold --window 4500000:5500000:500
     python src/plasticity_compare.py "$EXP" --alg "$alg" --mode fold-overlay \

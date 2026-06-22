@@ -23,9 +23,21 @@ for fov in 9; do
 
     # RTU-PPO with ReLU activations at every layer (dormancy + persistent
     # dormancy measured at each post-ReLU layer).
+    # NOTE: run only AFTER the ReLU sweep + process_hypers has written the
+    # selected hypers into this config (see ../../foragax-sweep/.../slurm.sh).
     python scripts/slurm.py \
         --cluster clusters/vulcan-gpu-vmap-32G.json \
         --tasks 5 --time 06:00:00 --runs 30 --force \
         --entry src/rtu_ppo.py \
         -e experiments/E139-rtu-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11/${fov}/RealTimeActorCriticMLPReLU.json
+
+    # Vanilla PPO with ReLU everywhere (incl. the wide mid layer); dormancy +
+    # persistent dormancy at all three post-ReLU sites.
+    # NOTE: run only AFTER the ReLU sweep + process_hypers has written the
+    # selected hypers into this config (see ../../foragax-sweep/.../slurm.sh).
+    python scripts/slurm.py \
+        --cluster clusters/vulcan-gpu-vmap-32G.json \
+        --tasks 5 --time 06:00:00 --runs 30 --force \
+        --entry src/rtu_ppo.py \
+        -e experiments/E139-rtu-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11/${fov}/ActorCriticMLPReLU.json
 done

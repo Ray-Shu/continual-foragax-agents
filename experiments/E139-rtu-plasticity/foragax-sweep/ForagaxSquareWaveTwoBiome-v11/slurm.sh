@@ -1,6 +1,6 @@
 #!/bin/bash
-# Hyperparameter sweep for RTU-PPO with ReLU activations on
-# ForagaxSquareWaveTwoBiome-v11, tuned at the short 1M horizon (tune-short /
+# Hyperparameter sweep for the ReLU-activation agents (RTU-PPO and vanilla PPO)
+# on ForagaxSquareWaveTwoBiome-v11, tuned at the short 1M horizon (tune-short /
 # eval-long convention; the selected config runs at 10M in ../../foragax/).
 #
 # Grid (mirrors the tanh RTU sweep, X30-ForagaxSquareWaveTwoBiome): actor alpha
@@ -13,9 +13,17 @@
 # fill missing seeds.
 
 for fov in 9; do
+    # RTU-PPO (ReLU)
     python scripts/slurm.py \
         --cluster clusters/vulcan-gpu-vmap-32G.json \
         --tasks 5 --time 03:00:00 --runs 5 --force \
         --entry src/rtu_ppo.py \
         -e experiments/E139-rtu-plasticity/foragax-sweep/ForagaxSquareWaveTwoBiome-v11/${fov}/RealTimeActorCriticMLPReLU.json
+
+    # Vanilla PPO (ReLU everywhere, incl. the wide mid layer)
+    python scripts/slurm.py \
+        --cluster clusters/vulcan-gpu-vmap-32G.json \
+        --tasks 5 --time 03:00:00 --runs 5 --force \
+        --entry src/rtu_ppo.py \
+        -e experiments/E139-rtu-plasticity/foragax-sweep/ForagaxSquareWaveTwoBiome-v11/${fov}/ActorCriticMLPReLU.json
 done
