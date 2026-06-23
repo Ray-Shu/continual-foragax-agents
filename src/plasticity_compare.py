@@ -105,21 +105,45 @@ def _parquet_path(experiment_path: Path) -> Path:
     return base / "data.parquet"
 
 
-def _is_vanilla(agent: str) -> bool:
-    """Tanh feedforward MLP (linear wide layer). The ReLU MLP is NOT vanilla."""
-    return agent == "ActorCriticMLP"
+def _agent_config(experiment_path: Path, agent: str) -> dict:
+    """The config json whose filename matches this alg (the alg == config stem),
+    or {} if not found. Used to read the architecture and activation off the
+    config rather than guessing from the name."""
+    base = experiment_path.parent if experiment_path.suffix == ".parquet" else experiment_path
+    for cfg in glob.glob(str(base / "**" / f"{agent}.json"), recursive=True):
+        try:
+            return json.loads(Path(cfg).read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+    return {}
 
 
-def _is_rtu(agent: str) -> bool:
-    return agent.startswith("RealTime")
+def _resolve_activation(experiment_path: Path, agent: str, df) -> str:
+    """tanh vs relu for an alg, resolved from the data first, then the config,
+    then the filename suffix as a last resort:
+      1. the parquet's `representation.activation` column (present for runs
+         collected once activation became a config field),
+      2. the matching config's representation.activation,
+      3. the `…ReLU` filename suffix (older results predate the field)."""
+    col = "representation.activation"
+    if col in df.columns:
+        vals = df[col].drop_nulls().unique().to_list()
+        if len(vals) == 1:
+            return str(vals[0])
+    rep = _agent_config(experiment_path, agent).get("metaParameters", {}).get("representation", {})
+    if rep.get("activation"):
+        return str(rep["activation"])
+    return "relu" if agent.endswith("ReLU") else "tanh"
 
 
-def _is_relu(agent: str) -> bool:
-    """ReLU-activation variant of either architecture (RTU or MLP)."""
-    return agent.endswith("ReLU")
+def _resolve_is_rtu(experiment_path: Path, agent: str) -> bool:
+    """Recurrent (RTU) vs feedforward MLP, from the config's top-level `agent`
+    field (the network class), falling back to the filename prefix."""
+    cls = _agent_config(experiment_path, agent).get("agent", agent)
+    return cls.startswith("RealTime")
 
 
-def _layer_widths(experiment_path: Path, agent: str) -> dict:
+def _layer_widths(experiment_path: Path, activation: str, is_rtu: bool) -> dict:
     """Read hidden / d_hidden from the run config and derive eff_rank denominators.
 
     pre1/pre2 are Dense(hidden_size) for both architectures, normalized by width.
@@ -143,40 +167,40 @@ def _layer_widths(experiment_path: Path, agent: str) -> dict:
             break
         except (KeyError, json.JSONDecodeError, OSError):
             continue
-    if _is_rtu(agent):
+    if is_rtu:
         rtu_denom = 2 * d_hidden  # RTU output width (tanh or relu)
-    elif _is_relu(agent):
+    elif activation == "relu":
         rtu_denom = d_hidden  # ReLU'd wide Dense fills its own width
     else:
         rtu_denom = None  # vanilla tanh MLP: linear wide layer, plot raw rank
     return {"pre1": hidden, "pre2": hidden, "rtu": rtu_denom}
 
 
-def _layer_titles(agent: str) -> dict:
+def _layer_titles(activation: str, is_rtu: bool) -> dict:
     """Architecture-aware panel titles. The pre1/pre2 sites are pre-tanh in the
     tanh nets and post-ReLU in the all-ReLU net; the wide slot is the linear
     Dense for vanilla, else the RTU output."""
-    if _is_rtu(agent):
+    if is_rtu:
         mid = "RTU output"
-    elif _is_relu(agent):
+    elif activation == "relu":
         mid = "Wide layer (ReLU)"
     else:
         mid = "Wide layer (linear)"
-    if _is_relu(agent):
+    if activation == "relu":
         return {"pre1": "ReLU 1", "pre2": "ReLU 2", "rtu": mid}
     return {"pre1": "Pre-tanh 1", "pre2": "Pre-tanh 2", "rtu": mid}
 
 
-def _families_for(agent: str) -> list:
+def _families_for(activation: str, is_rtu: bool) -> list:
     """Metric families that are meaningful for the architecture.
-      - all-ReLU RTU: dormancy (+ persistent dormancy) at every layer; no tanh,
-        so no saturation families.
-      - vanilla MLP: tanh saturation (+ persistent); no Sokar dormancy (the wide
-        layer is linear).
+      - all-ReLU (RTU or MLP): dormancy (+ persistent dormancy) at every layer;
+        no tanh, so no saturation families.
+      - vanilla (tanh) MLP: tanh saturation (+ persistent); no Sokar dormancy
+        (the wide layer is linear).
       - tanh RTU: saturation at the tanh sites, dormancy at the RTU output."""
-    if _is_relu(agent):
+    if activation == "relu":
         return ["eff_rank", "dormant", "dormant_persist"]
-    if _is_vanilla(agent):
+    if not is_rtu:
         return ["eff_rank", "sat_rate", "sat_persist"]
     return ["eff_rank", "sat_rate", "dormant", "sat_persist"]
 
@@ -479,11 +503,15 @@ def main():
 
     # Architecture: prefer the explicit --alg, else the single alg in the data.
     agent = args.alg or df_all["alg"][0]
-    widths = _layer_widths(exp, agent)
-    titles = _layer_titles(agent)
+    # Resolve activation (data -> config -> filename) and architecture (config
+    # agent field -> filename) instead of inferring both from the alg string.
+    activation = _resolve_activation(exp, agent, df_all)
+    is_rtu = _resolve_is_rtu(exp, agent)
+    widths = _layer_widths(exp, activation, is_rtu)
+    titles = _layer_titles(activation, is_rtu)
     # Drop families that aren't meaningful for this architecture (vanilla has no
     # post-ReLU site, hence no dormancy), preserving the requested order.
-    meaningful = _families_for(agent)
+    meaningful = _families_for(activation, is_rtu)
     families = [f for f in args.families if f in meaningful]
     dropped = [f for f in args.families if f not in meaningful]
     if dropped:
