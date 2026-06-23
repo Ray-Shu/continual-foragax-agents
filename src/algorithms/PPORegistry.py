@@ -28,9 +28,9 @@ def getAgent(name):
     if name.startswith("ActorCriticConv"):
         return ActorCriticConv
 
-    # The ReLU variants share the same class as their tanh counterparts; the
-    # activation is selected at construction time in rtu_ppo.py from the agent
-    # name. The distinct agent string is kept so results/plots stay separable.
+    # tanh and ReLU share one class; the activation comes from the explicit
+    # `representation.activation` config field (read in rtu_ppo.py). Variants are
+    # kept as separate config files so results/plots stay separable.
     if name.startswith("RealTimeActorCriticMLP"):
         return RealTimeActorCriticMLP
 

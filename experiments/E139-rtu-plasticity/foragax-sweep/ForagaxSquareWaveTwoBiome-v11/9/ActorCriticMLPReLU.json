@@ -1,5 +1,5 @@
 {
-    "agent": "ActorCriticMLPReLU",
+    "agent": "ActorCriticMLP",
     "problem": "Foragax",
     "total_steps": 1000000,
     "metaParameters": {
@@ -30,16 +30,16 @@
         "optimizer_actor": {
             "name": "Adam",
             "alpha": [
-                1e-3,
-                3e-4,
-                1e-4
+                0.001,
+                0.0003,
+                0.0001
             ],
             "beta1": 0.9,
             "beta2": [
                 0.999,
                 0.9
             ],
-            "eps": 1e-5
+            "eps": 1e-05
         },
         "optimizer_critic": {
             "name": "Adam",
@@ -53,11 +53,12 @@
                 0.999,
                 0.9
             ],
-            "eps": 1e-5
+            "eps": 1e-05
         },
         "representation": {
             "hidden": 64,
             "d_hidden": 512,
+            "activation": "relu",
             "use_layernorm": true
         }
     }

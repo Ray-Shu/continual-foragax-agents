@@ -98,6 +98,7 @@ class TrainConfig:
     d_hidden: int = struct.field(pytree_node=False)
     hidden_size: int = struct.field(pytree_node=False)
     agent_type: str = struct.field(pytree_node=False)
+    activation: str = struct.field(pytree_node=False)
     rollout_steps: int = struct.field(pytree_node=False)
     epochs: int = struct.field(pytree_node=False)
     num_mini_batch: int = struct.field(pytree_node=False)
@@ -200,13 +201,6 @@ class Interaction(NamedTuple):
 # Expectations are estimated as sample means over the rollout's collapsed
 # (T·B, H) activation matrix — Monte Carlo for E_{x∼D_rollout}.
 # ----------------------------------------------------------------------------
-def _agent_is_relu(agent_type):
-    """ReLU-activation variant of an MLP/RTU agent (e.g. RealTimeActorCriticMLPReLU,
-    ActorCriticMLPReLU). The activation is encoded in the agent name; the net
-    class is shared with the tanh counterpart."""
-    return agent_type.endswith("ReLU")
-
-
 def _agent_is_rtu(agent_type):
     """Recurrent (RTU) MLP agent vs the feedforward vanilla MLP."""
     return agent_type.startswith("RealTime")
@@ -406,7 +400,9 @@ def _pers_ema_init(config):
     tanh nets track pre1/pre2 (hidden_size); the ReLU net also tracks the RTU
     output (2*d_hidden). Empty for agents without probes."""
     H = config.hidden_size
-    if _agent_is_relu(config.agent_type):
+    if config.agent_type not in ("RealTimeActorCriticMLP", "ActorCriticMLP"):
+        return {}
+    if config.activation == "relu":
         # wide middle layer: RTU output (2*d_hidden) or the MLP wide Dense (d_hidden)
         wide = 2 * config.d_hidden if _agent_is_rtu(config.agent_type) else config.d_hidden
         return {
@@ -414,12 +410,10 @@ def _pers_ema_init(config):
             "actor_rtu": jnp.zeros(wide), "critic_rtu": jnp.zeros(wide),
             "actor_pre2": jnp.zeros(H), "critic_pre2": jnp.zeros(H),
         }
-    if config.agent_type in ("RealTimeActorCriticMLP", "ActorCriticMLP"):
-        return {
-            "actor_pre1": jnp.zeros(H), "critic_pre1": jnp.zeros(H),
-            "actor_pre2": jnp.zeros(H), "critic_pre2": jnp.zeros(H),
-        }
-    return {}
+    return {
+        "actor_pre1": jnp.zeros(H), "critic_pre1": jnp.zeros(H),
+        "actor_pre2": jnp.zeros(H), "critic_pre2": jnp.zeros(H),
+    }
 
 
 # ----------------------------------------------------------------------------
@@ -984,12 +978,11 @@ def experiment(rng, config: TrainConfig):
 
     # Create and initialize the network. `agent` is dynamically dispatched via
     # getAgent(config.agent_type); pyright sees only the base type so it can't
-    # verify variant-specific kwargs like use_layernorm. The ReLU variants share
-    # the tanh class; the activation is selected here from the agent name.
-    _activation = "relu" if _agent_is_relu(config.agent_type) else "tanh"
+    # verify variant-specific kwargs like use_layernorm. The activation (tanh or
+    # relu) comes from the explicit `representation.activation` config field.
     network = agent(
         action_dim=action_dim,
-        activation=_activation,
+        activation=config.activation,
         hidden_size=config.hidden_size,
         d_hidden=config.d_hidden,
         cont=False,
@@ -1375,17 +1368,19 @@ def experiment(rng, config: TrainConfig):
         # agent_type; each agent returns a {column_name: scalar} plasticity dict.
         _pp = (train_state.params, train_state.apply_fn, hstate, traj_batch.obs)
         _at = config.agent_type
-        if _agent_is_relu(_at):
-            # all-ReLU net (RTU or MLP): dormancy + effective rank at every
-            # post-ReLU site. The wide middle layer is read from the RTU output
-            # or the MLP's wide Dense, emitted into the unified '*_rtu' column.
-            plasticity = _compute_plasticity_metrics_relu(
-                *_pp, wide_inter=_relu_wide_intermediate(_at)
-            )
-        elif _at == "RealTimeActorCriticMLP":
-            plasticity = _compute_plasticity_metrics(*_pp)
-        elif _at == "ActorCriticMLP":
-            plasticity = _compute_plasticity_metrics_mlp(*_pp)
+        _relu = config.activation == "relu"
+        if _at in ("RealTimeActorCriticMLP", "ActorCriticMLP"):
+            if _relu:
+                # all-ReLU net (RTU or MLP): dormancy + effective rank at every
+                # post-ReLU site. The wide middle layer is read from the RTU
+                # output or the MLP's wide Dense, into the unified '*_rtu' column.
+                plasticity = _compute_plasticity_metrics_relu(
+                    *_pp, wide_inter=_relu_wide_intermediate(_at)
+                )
+            elif _at == "RealTimeActorCriticMLP":
+                plasticity = _compute_plasticity_metrics(*_pp)
+            else:
+                plasticity = _compute_plasticity_metrics_mlp(*_pp)
         else:
             plasticity = _zero_plasticity_metrics()
 
@@ -1394,7 +1389,7 @@ def experiment(rng, config: TrainConfig):
         # (decay sat_persist_decay) in the pers_ema dict carry, then threshold
         # AFTER the EMA: persistent saturation (|EMA| > 0.95) or persistent
         # dormancy (Sokar score <= 0.025). Empty for agents without probes.
-        if _agent_is_relu(_at):
+        if _at in ("RealTimeActorCriticMLP", "ActorCriticMLP") and _relu:
             means = _mean_abs_act_sites(*_pp, wide_inter=_relu_wide_intermediate(_at))
             pers_ema = {
                 k: config.sat_persist_decay * pers_ema[k]
@@ -1689,6 +1684,7 @@ def main():
         config = TrainConfig(
             d_hidden=int(hypers["representation"]["d_hidden"]),
             agent_type=exp.agent,
+            activation=str(hypers["representation"].get("activation", "tanh")),
             hidden_size=int(hypers["representation"]["hidden"]),
             rollout_steps=int(hypers["rollout_steps"]),
             epochs=int(hypers["epochs"]),
