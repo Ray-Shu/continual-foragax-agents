@@ -25,7 +25,7 @@
         "sat_persist_threshold": 0.95,
         "optimizer_actor": {
             "name": "Adam",
-            "alpha": 0.0003,
+            "alpha": 0.001,
             "beta1": 0.9,
             "beta2": 0.999,
             "eps": 1e-05
@@ -34,7 +34,7 @@
             "name": "Adam",
             "lr_scale": 0.1,
             "beta1": 0.9,
-            "beta2": 0.999,
+            "beta2": 0.9,
             "eps": 1e-05
         },
         "representation": {
