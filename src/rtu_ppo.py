@@ -201,6 +201,14 @@ class Interaction(NamedTuple):
 # Expectations are estimated as sample means over the rollout's collapsed
 # (T·B, H) activation matrix — Monte Carlo for E_{x∼D_rollout}.
 # ----------------------------------------------------------------------------
+# MLP/RTU agents that carry the plasticity probes. tanh and ReLU share a class
+# and differ only by representation.activation, but keep distinct agent names
+# (the agent field is the results-folder key, results/{name}/{env}/{agent}/...).
+_RTU_MLP_AGENTS = ("RealTimeActorCriticMLP", "RealTimeActorCriticMLPReLU")
+_VANILLA_MLP_AGENTS = ("ActorCriticMLP", "ActorCriticMLPReLU")
+_PROBED_AGENTS = _RTU_MLP_AGENTS + _VANILLA_MLP_AGENTS
+
+
 def _agent_is_rtu(agent_type):
     """Recurrent (RTU) MLP agent vs the feedforward vanilla MLP."""
     return agent_type.startswith("RealTime")
@@ -400,7 +408,7 @@ def _pers_ema_init(config):
     tanh nets track pre1/pre2 (hidden_size); the ReLU net also tracks the RTU
     output (2*d_hidden). Empty for agents without probes."""
     H = config.hidden_size
-    if config.agent_type not in ("RealTimeActorCriticMLP", "ActorCriticMLP"):
+    if config.agent_type not in _PROBED_AGENTS:
         return {}
     if config.activation == "relu":
         # wide middle layer: RTU output (2*d_hidden) or the MLP wide Dense (d_hidden)
@@ -1369,7 +1377,7 @@ def experiment(rng, config: TrainConfig):
         _pp = (train_state.params, train_state.apply_fn, hstate, traj_batch.obs)
         _at = config.agent_type
         _relu = config.activation == "relu"
-        if _at in ("RealTimeActorCriticMLP", "ActorCriticMLP"):
+        if _at in _PROBED_AGENTS:
             if _relu:
                 # all-ReLU net (RTU or MLP): dormancy + effective rank at every
                 # post-ReLU site. The wide middle layer is read from the RTU
@@ -1377,7 +1385,7 @@ def experiment(rng, config: TrainConfig):
                 plasticity = _compute_plasticity_metrics_relu(
                     *_pp, wide_inter=_relu_wide_intermediate(_at)
                 )
-            elif _at == "RealTimeActorCriticMLP":
+            elif _at in _RTU_MLP_AGENTS:
                 plasticity = _compute_plasticity_metrics(*_pp)
             else:
                 plasticity = _compute_plasticity_metrics_mlp(*_pp)
@@ -1389,7 +1397,7 @@ def experiment(rng, config: TrainConfig):
         # (decay sat_persist_decay) in the pers_ema dict carry, then threshold
         # AFTER the EMA: persistent saturation (|EMA| > 0.95) or persistent
         # dormancy (Sokar score <= 0.025). Empty for agents without probes.
-        if _at in ("RealTimeActorCriticMLP", "ActorCriticMLP") and _relu:
+        if _at in _PROBED_AGENTS and _relu:
             means = _mean_abs_act_sites(*_pp, wide_inter=_relu_wide_intermediate(_at))
             pers_ema = {
                 k: config.sat_persist_decay * pers_ema[k]
@@ -1397,7 +1405,7 @@ def experiment(rng, config: TrainConfig):
                 for k in means
             }
             persist = _dormant_persist_from_ema(pers_ema, 0.025)
-        elif _at in ("RealTimeActorCriticMLP", "ActorCriticMLP"):
+        elif _at in _PROBED_AGENTS:
             means = _mean_tanh_sites(*_pp)
             pers_ema = {
                 k: config.sat_persist_decay * pers_ema[k]

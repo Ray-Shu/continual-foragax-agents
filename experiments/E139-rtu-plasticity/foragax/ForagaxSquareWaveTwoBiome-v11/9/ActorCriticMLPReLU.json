@@ -1,5 +1,5 @@
 {
-    "agent": "ActorCriticMLP",
+    "agent": "ActorCriticMLPReLU",
     "problem": "Foragax",
     "total_steps": 10000000,
     "metaParameters": {
