@@ -17,6 +17,7 @@ class ActorCriticMLP(nn.Module):
     use_sinusoidal_encoding: bool = False
     use_reward_trace: bool = False
     use_layernorm: bool = False
+    use_middle_layer: bool = True
 
     @nn.compact
     def __call__(self, hidden, obs):
@@ -65,18 +66,19 @@ class ActorCriticMLP(nn.Module):
             (critic_embedding, last_action_encoded, last_reward_plus), axis=-1
         )
 
-        actor_embedding = nn.Dense(
-            self.d_hidden,
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-            name="actor_dense2",
-        )(actor_embedding)
-        critic_embedding = nn.Dense(
-            self.d_hidden,
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-            name="critic_dense2",
-        )(critic_embedding)
+        if self.use_middle_layer:
+            actor_embedding = nn.Dense(
+                self.d_hidden,
+                kernel_init=orthogonal(np.sqrt(2)),
+                bias_init=constant(0.0),
+                name="actor_dense2",
+            )(actor_embedding)
+            critic_embedding = nn.Dense(
+                self.d_hidden,
+                kernel_init=orthogonal(np.sqrt(2)),
+                bias_init=constant(0.0),
+                name="critic_dense2",
+            )(critic_embedding)
 
         actor_mean = nn.Dense(
             self.hidden_size,

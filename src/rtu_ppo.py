@@ -114,6 +114,7 @@ class TrainConfig:
     use_reward_trace: bool = struct.field(pytree_node=False)
     use_hint_trace: bool = struct.field(pytree_node=False)
     use_layernorm: bool = struct.field(pytree_node=False)
+    use_middle_layer: bool = struct.field(pytree_node=False)
     conv: str = struct.field(pytree_node=False)
     allocate_frames: bool = struct.field(pytree_node=False)
     video_length: int = struct.field(pytree_node=False)
@@ -742,6 +743,8 @@ def experiment(rng, config: TrainConfig):
         RealTimeActorCriticConvHintRTU,
     ):
         kwargs["conv"] = config.conv
+    if _agent_class is ActorCriticMLP:
+        kwargs["use_middle_layer"] = config.use_middle_layer
 
     # Create and initialize the network.
     network = agent(
@@ -1685,6 +1688,9 @@ def main():
                     "use_layernorm",
                     hypers.get("representation", {}).get("use_layernorm", False),
                 )
+            ),
+            use_middle_layer=bool(
+                hypers.get("representation", {}).get("use_middle_layer", True)
             ),
             conv=str(hypers.get("representation", {}).get("conv", "Conv2D")),
             reward_trace_decay=float(

@@ -1,8 +1,9 @@
 #!/bin/bash
 #SBATCH --account=aip-whitem
 #SBATCH --job-name=R1-ForagaxSquareWaveTwoBiome-v11_foragax_ForagaxSquareWaveTwoBiome-v11_process_data
-#SBATCH --mem-per-cpu=16G
-#SBATCH --ntasks=16
+#SBATCH --mem=32G
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
 #SBATCH --output=/scratch/%u/logs/slurm-%j.out
 #SBATCH --time=02:00:00
 

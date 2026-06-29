@@ -84,7 +84,7 @@ def main(experiment_path: Path):
         aperture = int(group) if group.isdigit() else None
 
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(_slurm_max_workers(), len(sub_results))
+            max_workers=min(_slurm_max_workers(), len(sub_results), 4)
         ) as executor:
             futures = [
                 executor.submit(process_alg_result, alg_result, group, aperture)
