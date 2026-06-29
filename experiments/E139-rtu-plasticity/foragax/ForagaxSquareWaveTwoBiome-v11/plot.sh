@@ -18,7 +18,10 @@ python src/learning_curve.py "$EXP" \
     --filter-alg-apertures RealTimeActorCriticMLP:9 ActorCriticMLP:9 RealTimeActorCriticMLPReLU:9 ActorCriticMLPReLU:9 \
     --end-frame 10000000 \
     --vertical-lines $SWITCHES \
-    --legend
+    --legend-on-bar \
+    --plot-avg \
+    --horizontal-bars \
+    --ylim 2.2
 
 # Per-layer plasticity plots, one algorithm at a time so the figures land in
 # separate plots/<agent>/ folders (an agent with no data yet is skipped):
