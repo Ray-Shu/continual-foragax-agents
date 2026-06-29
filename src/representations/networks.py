@@ -316,6 +316,7 @@ def buildFeatureNetwork(inputs: Tuple, params: Dict[str, Any], rng: Any):
                 learn_initial_h=params.get("learn_initial_h", True),
                 use_layernorm=params.get("use_layernorm", False),
                 mlp=params.get("mlp", False),
+                activation=params.get("activation", "relu"),
                 name="ForagerGRUNetReLU",
             )
             return net(x, *args, **kwargs)
@@ -338,6 +339,7 @@ def buildFeatureNetwork(inputs: Tuple, params: Dict[str, Any], rng: Any):
                 learn_initial_h=params.get("learn_initial_h", True),
                 use_layernorm=params.get("use_layernorm", False),
                 mlp=params.get("mlp", False),
+                activation=params.get("activation", "relu"),
                 name="ForagerRTUNetReLU",
             )
             return net(x, *args, **kwargs)
@@ -433,12 +435,23 @@ class RTU(hk.Module):
         self,
         hidden: int,
         d_hidden: int,
+        activation: str = "relu",
         name: str = "",
     ):
         super().__init__(name=name)
         self.hidden = hidden
         self.d_hidden = d_hidden
-        self.rtu = hkflax.lift(RTLRTUs(int(self.d_hidden), d_input=self.hidden, params_type='exp_exp', name='rtu_inner'), name='lifted_rtu')
+        self.activation = activation
+        self.rtu = hkflax.lift(
+            RTLRTUs(
+                int(self.d_hidden),
+                d_input=self.hidden,
+                params_type="exp_exp",
+                activation=activation,
+                name="rtu_inner",
+            ),
+            name="lifted_rtu",
+        )
 
     def initial_state(self, batch=1):
         hidden_init = (
@@ -1004,6 +1017,7 @@ class ForagerGRUNetReLU(hk.Module):
         learn_initial_h=True,
         use_layernorm=False,
         mlp: bool = False,
+        activation: str = "relu",
         name: str = "",
     ):
         super().__init__(name=name)
@@ -1024,6 +1038,7 @@ class ForagerGRUNetReLU(hk.Module):
         self.pre_gru_layers = self.pre_core_layers
         self.post_gru_layers = self.post_core_layers
         self.mlp = mlp
+        self.activation_fn = hku.crelu if activation == "crelu" else jax.nn.relu
         w_init = hk.initializers.Orthogonal(np.sqrt(2))
 
         if not mlp:
@@ -1032,7 +1047,7 @@ class ForagerGRUNetReLU(hk.Module):
                 embedding.append(
                     hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                 )
-            embedding.append(jax.nn.relu)
+            embedding.append(self.activation_fn)
             self.embedding = hk.Sequential(embedding)
 
         self.flatten = hk.Flatten(preserve_dims=2, name="flatten")
@@ -1044,7 +1059,7 @@ class ForagerGRUNetReLU(hk.Module):
                 vision_proj.append(
                     hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                 )
-            vision_proj.append(jax.nn.relu)
+            vision_proj.append(self.activation_fn)
             self.vision_proj = hk.Sequential(vision_proj)
 
             if self.scalars > 0:
@@ -1053,7 +1068,7 @@ class ForagerGRUNetReLU(hk.Module):
                     scalars_proj.append(
                         hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                     )
-                scalars_proj.append(jax.nn.relu)
+                scalars_proj.append(self.activation_fn)
                 self.scalars_proj = hk.Sequential(scalars_proj)
 
         if self.pre_core_layers > 0:
@@ -1064,7 +1079,7 @@ class ForagerGRUNetReLU(hk.Module):
                     layers.append(
                         hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                     )
-                layers.append(jax.nn.relu)
+                layers.append(self.activation_fn)
             self.pre_core_mlp = hk.Sequential(layers)
 
         self.gru = GRU(self.d_hidden, learn_initial_h=learn_initial_h, name="gru")
@@ -1077,7 +1092,7 @@ class ForagerGRUNetReLU(hk.Module):
                     layers.append(
                         hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                     )
-                layers.append(jax.nn.relu)
+                layers.append(self.activation_fn)
             self.post_core_mlp = hk.Sequential(layers)
 
         self.phi = hk.Flatten(preserve_dims=2, name="phi")
@@ -1148,7 +1163,7 @@ class ForagerGRUNetReLU(hk.Module):
             gru_out, states_sequence, initial_carry = self.gru(
                 gru_in, reset, carry, is_target=is_target
             )
-            gru_out = jax.nn.relu(gru_out)
+            gru_out = self.activation_fn(gru_out)
 
             # Concat: vision + gru_out + skip(hint) + other_scalars
             parts = [h, gru_out, hint]
@@ -1167,7 +1182,7 @@ class ForagerGRUNetReLU(hk.Module):
             outputs_sequence, states_sequence, initial_carry = self.gru(
                 h, reset, carry, is_target=is_target
             )
-            outputs_sequence = jax.nn.relu(outputs_sequence)
+            outputs_sequence = self.activation_fn(outputs_sequence)
             outputs_sequence = jnp.concatenate([outputs_sequence, h], axis=-1)
 
         if self.post_core_layers > 0:
@@ -1194,6 +1209,7 @@ class ForagerRTUNetReLU(hk.Module):
         learn_initial_h=True,
         use_layernorm=False,
         mlp: bool = False,
+        activation: str = "relu",
         name: str = "",
     ):
         super().__init__(name=name)
@@ -1214,6 +1230,8 @@ class ForagerRTUNetReLU(hk.Module):
         self.pre_gru_layers = self.pre_core_layers
         self.post_gru_layers = self.post_core_layers
         self.mlp = mlp
+        self.activation = activation
+        self.activation_fn = hku.crelu if activation == "crelu" else jax.nn.relu
         w_init = hk.initializers.Orthogonal(np.sqrt(2))
 
         if not mlp:
@@ -1222,7 +1240,7 @@ class ForagerRTUNetReLU(hk.Module):
                 embedding.append(
                     hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                 )
-            embedding.append(jax.nn.relu)
+            embedding.append(self.activation_fn)
             self.embedding = hk.Sequential(embedding)
 
         self.flatten = hk.Flatten(preserve_dims=2, name="flatten")
@@ -1234,7 +1252,7 @@ class ForagerRTUNetReLU(hk.Module):
                 vision_proj.append(
                     hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                 )
-            vision_proj.append(jax.nn.relu)
+            vision_proj.append(self.activation_fn)
             self.vision_proj = hk.Sequential(vision_proj)
 
             if self.scalars > 0:
@@ -1243,7 +1261,7 @@ class ForagerRTUNetReLU(hk.Module):
                     scalars_proj.append(
                         hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                     )
-                scalars_proj.append(jax.nn.relu)
+                scalars_proj.append(self.activation_fn)
                 self.scalars_proj = hk.Sequential(scalars_proj)
 
         if self.pre_core_layers > 0:
@@ -1254,7 +1272,7 @@ class ForagerRTUNetReLU(hk.Module):
                     layers.append(
                         hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                     )
-                layers.append(jax.nn.relu)
+                layers.append(self.activation_fn)
             self.pre_core_mlp = hk.Sequential(layers)
 
         if self.post_core_layers > 0:
@@ -1265,7 +1283,7 @@ class ForagerRTUNetReLU(hk.Module):
                     layers.append(
                         hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
                     )
-                layers.append(jax.nn.relu)
+                layers.append(self.activation_fn)
             self.post_core_mlp = hk.Sequential(layers)
 
         self.phi = hk.Flatten(preserve_dims=2, name="phi")
@@ -1335,7 +1353,12 @@ class ForagerRTUNetReLU(hk.Module):
             if self.pre_core_layers > 0:
                 gru_in = self.pre_core_mlp(gru_in)
 
-            rtu = RTU(hidden=gru_in.shape[-1], d_hidden=self.d_hidden, name="rtu")
+            rtu = RTU(
+                hidden=gru_in.shape[-1],
+                d_hidden=self.d_hidden,
+                activation=self.activation,
+                name="rtu",
+            )
             gru_out, states_sequence, initial_carry = rtu(
                 gru_in, reset, carry, is_target=is_target
             )
@@ -1356,7 +1379,12 @@ class ForagerRTUNetReLU(hk.Module):
             else:
                 core_in = h
 
-            rtu = RTU(hidden=core_in.shape[-1], d_hidden=self.d_hidden, name="rtu")
+            rtu = RTU(
+                hidden=core_in.shape[-1],
+                d_hidden=self.d_hidden,
+                activation=self.activation,
+                name="rtu",
+            )
             outputs_sequence, states_sequence, initial_carry = rtu(
                 core_in, reset, carry, is_target=is_target
             )

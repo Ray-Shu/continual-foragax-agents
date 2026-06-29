@@ -30,6 +30,7 @@ from environments.Foragax import Foragax
 from experiment import ExperimentModel
 from problems.registry import getProblem
 from utils.checkpoint import Checkpoint
+from utils.dqn_metrics import DQNMetricsComputer
 from utils.preempt import TimeoutHandler
 from utils.rlglue import RlGlue
 
@@ -241,6 +242,7 @@ if not any(idx in video_idxs for idx in indices) and num_indices > 1:
 start_step = None
 save_every = first_hypers.get("experiment", {}).get("save_every", 10_001_000)
 video_every = first_hypers.get("experiment", {}).get("video_every", save_every)
+ntk_freq = int(first_hypers.get("experiment", {}).get("ntk_freq", 0))
 agent_metrics_obj = getattr(glues[0].agent.state, "metrics", None)
 METRIC_NAMES: tuple[str, ...] = (
     tuple(f.name for f in fields(agent_metrics_obj))
@@ -260,6 +262,10 @@ def reset_datas():
     fresh_datas = {"rewards": np.empty((len(indices), n), dtype=np.float16)}
     for k in METRIC_NAMES:
         fresh_datas[k] = np.empty((len(indices), n), dtype=np.float16)
+    if ntk_freq > 0:
+        fresh_datas["churn_norm"] = np.full((len(indices), n), np.nan, dtype=np.float16)
+        fresh_datas["ntk_rank"] = np.full((len(indices), n), np.nan, dtype=np.float16)
+        fresh_datas["ntk_cond"] = np.full((len(indices), n), np.nan, dtype=np.float32)
     if isinstance(glues[0].environment, Foragax):
         fresh_datas["pos"] = np.empty((len(indices), n, 2), dtype=np.int32)
         fresh_datas["biome_id"] = np.empty((len(indices), n), dtype=np.int32)
@@ -373,6 +379,12 @@ if start_step is None:
     start_step = 0
 else:
     logger.debug(f"Loaded checkpoints, resuming from step {start_step}")
+
+# Initialize DQN metrics computer and collect reference observations
+metrics_computer = DQNMetricsComputer(glues, datas, ntk_freq)
+if ntk_freq > 0:
+    x_ref_steps = first_hypers.get("experiment", {}).get("x_ref_steps", 500)
+    metrics_computer.collect_x_ref(glue_states, v_step, x_ref_steps)
 
 current_step = start_step
 training_pbar = tqdm(
@@ -510,7 +522,9 @@ if use_explicit_update_steps:
 while current_step < n:
     next_save = ((current_step // save_every) + 1) * save_every
     next_video = ((current_step // video_every) + 1) * video_every
-    next_milestone = min(next_save, next_video, n)
+    # Add ntk_freq as a milestone so metrics are computed with exact per-step states
+    next_ntk = ((current_step // ntk_freq) + 1) * ntk_freq if ntk_freq > 0 else n + 1
+    next_milestone = min(next_save, next_video, next_ntk, n)
     steps_in_iter = next_milestone - current_step
 
     if steps_in_iter <= 0:
@@ -660,7 +674,18 @@ while current_step < n:
     for i, idx in enumerate(indices):
         data_idx = tree_map(lambda x: x[:, i], data_chunk)
         for key in datas:
-            datas[key][i, current_step : current_step + steps_in_iter] = data_idx[key]
+            if key in data_idx:
+                datas[key][i, current_step : current_step + steps_in_iter] = data_idx[key]
+
+        # Compute NTK metrics at regular intervals throughout the chunk
+        if len(glues) > 1 or use_explicit_update_steps:
+            glue_state_idx = tree_map(lambda x: x[i], glue_states)
+        else:
+            glue_state_idx = glue_states
+
+        # Compute metrics at ntk_freq boundaries
+        if metrics_computer.should_compute(next_milestone):
+            metrics_computer.compute_and_store(i, next_milestone, glue_state_idx)
 
         if next_milestone % save_every == 0 and next_milestone < n:
             checkpoint_start_time = time.time()

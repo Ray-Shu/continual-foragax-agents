@@ -3,13 +3,11 @@
 # Ensure third-party libraries that expect older JAX internals can import.
 # This sets a small compatibility alias if needed before importing distrax/tfp.
 import argparse
-import utils.jax_compat  # noqa: F401
-import socket
-import time
 import logging
 import os
+import socket
 import sys
-import zlib
+import time
 from collections.abc import Mapping
 from functools import partial
 from typing import Any, Callable, NamedTuple, Tuple
@@ -30,6 +28,7 @@ from ml_instrumentation.Sampler import Ignore, MovingAverage, Subsample
 from ml_instrumentation.utils import Pipe
 from PyExpUtils.results.tools import getParamsAsDict
 
+import utils.jax_compat  # noqa: F401
 from algorithms.nn.ACConv import ActorCriticConv
 from algorithms.nn.ACMLP import ActorCriticMLP
 from algorithms.nn.RealTimeACConv import RealTimeActorCriticConv
@@ -43,17 +42,20 @@ from experiment import ExperimentModel
 from utils.checkpoint import Checkpoint
 from utils.ml_instrumentation.Sampler import Mean
 from utils.ml_instrumentation.utils import Last
+from utils.ppo_metrics import (
+    compute_ppo_metrics,
+    nan_ppo_metrics,
+    nan_weight_drift,
+    nan_weight_norm,
+    weight_drift,
+    weight_norm,
+)
 from utils.preempt import TimeoutHandler
 
 sys.path.insert(0, os.path.abspath("/tmp/src"))
 from foragax.registry import make
 
 PERIOD = 182500
-
-
-def _keypath_crc32(path) -> int:
-    path_str = "/".join(str(getattr(entry, "key", entry)) for entry in path)
-    return zlib.crc32(path_str.encode("utf-8"))
 
 
 def parse_indices(index_specs: list[str], total: int | None = None) -> list[int]:
@@ -97,8 +99,8 @@ class TrainConfig:
     # ---- STATIC (uniform across vmapped runs) ----
     d_hidden: int = struct.field(pytree_node=False)
     hidden_size: int = struct.field(pytree_node=False)
-    agent_type: str = struct.field(pytree_node=False)
     activation: str = struct.field(pytree_node=False)
+    agent_type: str = struct.field(pytree_node=False)
     rollout_steps: int = struct.field(pytree_node=False)
     epochs: int = struct.field(pytree_node=False)
     num_mini_batch: int = struct.field(pytree_node=False)
@@ -112,6 +114,7 @@ class TrainConfig:
     use_reward_trace: bool = struct.field(pytree_node=False)
     use_hint_trace: bool = struct.field(pytree_node=False)
     use_layernorm: bool = struct.field(pytree_node=False)
+    use_middle_layer: bool = struct.field(pytree_node=False)
     conv: str = struct.field(pytree_node=False)
     allocate_frames: bool = struct.field(pytree_node=False)
     video_length: int = struct.field(pytree_node=False)
@@ -119,6 +122,20 @@ class TrainConfig:
     use_spectral_reg: bool = struct.field(pytree_node=False)
     use_reset: bool = struct.field(pytree_node=False)
     use_shrink_and_perturb: bool = struct.field(pytree_node=False)
+    # NTK / churn plasticity metrics (computed inside the jitted scan)
+    compute_ntk: bool = struct.field(pytree_node=False)
+    ntk_freq: int = struct.field(pytree_node=False)
+    n_ref: int = struct.field(pytree_node=False)
+    # Row-chunk size for the memory-bounded NTK Gram build; result-invariant,
+    # trades peak memory against recompute.  Defaults to n_ref // 4.
+    chunked_ref: int = struct.field(pytree_node=False)
+    # Weight-norm metric -- independent cadence / flag from the NTK metrics above
+    compute_weight_norm: bool = struct.field(pytree_node=False)
+    weight_norm_freq: int = struct.field(pytree_node=False)
+    # Weight-drift metric (||theta - theta_0||, split pi/vf/total) -- independent
+    # cadence / flag; the diagnostic counterpart to L2-to-init ("w0") reg.
+    compute_weight_drift: bool = struct.field(pytree_node=False)
+    weight_drift_freq: int = struct.field(pytree_node=False)
     # ---- DYNAMIC (may vary per idx; arithmetic only) ----
     max_grad_norm: float
     l2_reg_pi: float
@@ -153,6 +170,7 @@ class TrainConfig:
     sp_interval: int = -1
     shrink_factor: float = 1.0
     noise_scale: float = 0.0
+
 
 class GymnaxEnvState(struct.PyTreeNode):
     to_render: bool = struct.field(pytree_node=True)
@@ -534,9 +552,20 @@ def calculate_average_reward_gae(traj_batch, last_val, gamma, gae_lambda):
 
 @partial(jax.jit, static_argnums=(1, 9, 12))
 def loss_fn(
-    params, agent_fn, traj_batch, gae, targets, init_hstate, clip_eps, vf_coef, ent_coef,
-    use_l2_init=False, initial_params=None, l2_init_multipliers=None,
-    use_spectral_reg=False, spectral_reg_multipliers=None,
+    params,
+    agent_fn,
+    traj_batch,
+    gae,
+    targets,
+    init_hstate,
+    clip_eps,
+    vf_coef,
+    ent_coef,
+    use_l2_init=False,
+    initial_params=None,
+    l2_init_multipliers=None,
+    use_spectral_reg=False,
+    spectral_reg_multipliers=None,
 ):
     rnn_in = traj_batch.obs
     _, pi, value = agent_fn(params, init_hstate, rnn_in)
@@ -570,7 +599,9 @@ def loss_fn(
         # optax.l2_loss(a, b) = 0.5 * (a - b)^2 per element
         l2_init_loss = jax.tree_util.tree_map(
             lambda m, p, p0: m * optax.l2_loss(p, p0).sum(),
-            l2_init_multipliers, params, initial_params,
+            l2_init_multipliers,
+            params,
+            initial_params,
         )
         total_loss = total_loss + jax.tree_util.tree_reduce(
             lambda a, b: a + b, l2_init_loss
@@ -600,12 +631,14 @@ def loss_fn(
             """Estimate σ₁(w_2d) via power iteration (1 step by default)."""
             u = jnp.ones((w_2d.shape[0],), dtype=w_2d.dtype)
             u = u / (jnp.linalg.norm(u) + 1e-12)
+
             def _step(u, _):
                 v = w_2d.T @ u
                 v = v / (jnp.linalg.norm(v) + 1e-12)
                 u_new = w_2d @ v
                 u_new = u_new / (jnp.linalg.norm(u_new) + 1e-12)
                 return u_new, v
+
             u, vs = jax.lax.scan(_step, u, None, length=num_iters)
             v = vs[-1]
             sigma = u @ w_2d @ v
@@ -638,19 +671,21 @@ def loss_fn(
                 d_out = param.shape[-1]
                 w_2d = jnp.transpose(param, (3, 0, 1, 2)).reshape((d_out, -1))
                 sigma = _power_iteration_sigma1(w_2d)
-                return multiplier * jnp.square(sigma ** _SR_K - 1.0)
+                return multiplier * jnp.square(sigma**_SR_K - 1.0)
 
             # --- Dense / multiplicative weight matrices (2-D) ---
             # Paper: (σ₁(W)^k − 1)²
             if param.ndim == 2:
                 sigma = _power_iteration_sigma1(param)
-                return multiplier * jnp.square(sigma ** _SR_K - 1.0)
+                return multiplier * jnp.square(sigma**_SR_K - 1.0)
 
             # Anything else (scalars, etc.) – skip
             return jnp.zeros((), dtype=param.dtype)
 
         spectral_losses = jax.tree_util.tree_map_with_path(
-            _spectral_leaf, spectral_reg_multipliers, params,
+            _spectral_leaf,
+            spectral_reg_multipliers,
+            params,
         )
         total_loss = total_loss + jax.tree_util.tree_reduce(
             lambda a, b: a + b, spectral_losses
@@ -783,7 +818,13 @@ def env_step(runner_state, _):
 
 @jax.jit
 def update_minbatch(carry_in, batch_info):
-    train_state, config, initial_params, l2_init_multipliers, spectral_reg_multipliers = carry_in
+    (
+        train_state,
+        config,
+        initial_params,
+        l2_init_multipliers,
+        spectral_reg_multipliers,
+    ) = carry_in
     minibatch, init_hstate = batch_info
     # minibatch: (seq_len,minibatch_size, _)
     # init_hstate: (1, d_hidden)
@@ -922,7 +963,9 @@ def update_step(update_state):
 def experiment(rng, config: TrainConfig):
     kwargs = dict(config.env_kwargs)
 
-    print(f"Creating env {config.env_id} with aperture size {config.aperture_size} and kwargs {kwargs}")
+    print(
+        f"Creating env {config.env_id} with aperture size {config.aperture_size} and kwargs {kwargs}"
+    )
 
     env = make(config.env_id, aperture_size=config.aperture_size, **kwargs)
 
@@ -970,6 +1013,18 @@ def experiment(rng, config: TrainConfig):
     _agent_class = getAgent(config.agent_type)
     agent = _agent_class
 
+    if config.activation == "crelu" and _agent_class not in (
+        ActorCriticConv,
+        ActorCriticMLP,
+        RealTimeActorCriticConv,
+        RealTimeActorCriticMLP,
+    ):
+        raise NotImplementedError(
+            "CReLU activation is currently wired for ActorCriticConv, "
+            "ActorCriticMLP, RealTimeActorCriticConv, and "
+            "RealTimeActorCriticMLP."
+        )
+
     kwargs = {}
     if config.sparsity is not None:
         kwargs["sparsity"] = config.sparsity
@@ -983,6 +1038,8 @@ def experiment(rng, config: TrainConfig):
         RealTimeActorCriticConvHintRTU,
     ):
         kwargs["conv"] = config.conv
+    if _agent_class is ActorCriticMLP:
+        kwargs["use_middle_layer"] = config.use_middle_layer
 
     # Create and initialize the network. `agent` is dynamically dispatched via
     # getAgent(config.agent_type); pyright sees only the base type so it can't
@@ -1025,18 +1082,34 @@ def experiment(rng, config: TrainConfig):
         RealTimeActorCriticConvPooling,
         RealTimeActorCriticConvHint,
     )
+    _is_plain_conv_rtu = _agent_class is RealTimeActorCriticConv
     _is_conv_hint_rtu = _agent_class is RealTimeActorCriticConvHintRTU
-    _is_mlp_rtu = _agent_class in (RealTimeActorCriticMLP, RealTimeActorCriticMLPMulti, ActorCriticMLP)
-    if _is_conv_rtu:
-        # RTU receives hidden_size-wide embedding; action/reward/hint folded in before the Dense
-        d_input = config.hidden_size
+    _is_mlp_rtu = _agent_class in (
+        RealTimeActorCriticMLP,
+        RealTimeActorCriticMLPMulti,
+        ActorCriticMLP,
+    )
+    activation_multiplier = 2 if config.activation == "crelu" else 1
+    if _is_plain_conv_rtu:
+        # RTU receives [conv Dense(hidden_size), action, last_reward+hint, ...]
+        d_input = (
+            config.hidden_size * activation_multiplier + action_dim + hint_shape[0]
+        )
+        if config.use_sinusoidal_encoding:
+            d_input += 2
+        if config.use_reward_trace:
+            d_input += 1
+    elif _is_conv_rtu:
+        d_input = config.hidden_size * activation_multiplier
     elif _is_conv_hint_rtu:
         # No main RTU — d_input is ignored by initialize_memory, pass hint input size
         d_input = hint_dim
     elif _is_mlp_rtu:
         # RTU receives [Dense(hidden_size), action, last_reward+hint, ...]
         # hint_shape[0] = 1 + hint_dim (accounts for reward + hint)
-        d_input = config.hidden_size + action_dim + hint_shape[0]
+        d_input = (
+            config.hidden_size * activation_multiplier + action_dim + hint_shape[0]
+        )
         if config.use_sinusoidal_encoding:
             d_input += 2
         if config.use_reward_trace:
@@ -1078,12 +1151,22 @@ def experiment(rng, config: TrainConfig):
                 "pi": optax.chain(
                     optax.clip_by_global_norm(config.max_grad_norm),
                     optax.add_decayed_weights(config.l2_reg_pi),
-                    optax.adam(config.alpha_pi, b1=config.adam_b1_pi, b2=config.adam_b2_pi, eps=config.adam_eps_pi)
+                    optax.adam(
+                        config.alpha_pi,
+                        b1=config.adam_b1_pi,
+                        b2=config.adam_b2_pi,
+                        eps=config.adam_eps_pi,
+                    ),
                 ),
                 "vf": optax.chain(
                     optax.clip_by_global_norm(config.max_grad_norm),
                     optax.add_decayed_weights(config.l2_reg_vf),
-                    optax.adam(config.alpha_vf, b1=config.adam_b1_vf, b2=config.adam_b2_vf, eps=config.adam_eps_vf)
+                    optax.adam(
+                        config.alpha_vf,
+                        b1=config.adam_b1_vf,
+                        b2=config.adam_b2_vf,
+                        eps=config.adam_eps_vf,
+                    ),
                 ),
                 "frozen": optax.set_to_zero(),
             },
@@ -1094,11 +1177,21 @@ def experiment(rng, config: TrainConfig):
             {
                 "pi": optax.chain(
                     optax.add_decayed_weights(config.l2_reg_pi),
-                    optax.adam(config.alpha_pi, b1=config.adam_b1_pi, b2=config.adam_b2_pi, eps=config.adam_eps_pi)
+                    optax.adam(
+                        config.alpha_pi,
+                        b1=config.adam_b1_pi,
+                        b2=config.adam_b2_pi,
+                        eps=config.adam_eps_pi,
+                    ),
                 ),
                 "vf": optax.chain(
                     optax.add_decayed_weights(config.l2_reg_vf),
-                    optax.adam(config.alpha_vf, b1=config.adam_b1_vf, b2=config.adam_b2_vf, eps=config.adam_eps_vf)
+                    optax.adam(
+                        config.alpha_vf,
+                        b1=config.adam_b1_vf,
+                        b2=config.adam_b2_vf,
+                        eps=config.adam_eps_vf,
+                    ),
                 ),
                 "frozen": optax.set_to_zero(),
             },
@@ -1129,7 +1222,10 @@ def experiment(rng, config: TrainConfig):
             )
 
         l2_init_multipliers = _make_l2_init_multipliers(
-            network_params, labels, config.lambda_l2_init_pi, config.lambda_l2_init_vf,
+            network_params,
+            labels,
+            config.lambda_l2_init_pi,
+            config.lambda_l2_init_vf,
         )
     else:
         initial_params = None
@@ -1142,6 +1238,7 @@ def experiment(rng, config: TrainConfig):
     # multiplier tree is None and the compile-time guard in loss_fn skips
     # the whole block.
     if config.use_spectral_reg:
+
         def _make_spectral_reg_multipliers(params, labels, lambda_pi, lambda_vf):
             flat_params = traverse_util.flatten_dict(params, sep="/")
             flat_labels = traverse_util.flatten_dict(labels, sep="/")
@@ -1155,8 +1252,10 @@ def experiment(rng, config: TrainConfig):
             )
 
         spectral_reg_multipliers = _make_spectral_reg_multipliers(
-            network_params, labels,
-            config.lambda_spectral_pi, config.lambda_spectral_vf,
+            network_params,
+            labels,
+            config.lambda_spectral_pi,
+            config.lambda_spectral_vf,
         )
     else:
         spectral_reg_multipliers = None
@@ -1173,8 +1272,7 @@ def experiment(rng, config: TrainConfig):
         # Pre-compute which leaves belong to the last layer, keyed by flattened path.
         _flat_params = traverse_util.flatten_dict(network_params, sep="/")
         _last_layer_keys = frozenset(
-            k for k in _flat_params
-            if "actor_mean" in k or "critic_value" in k
+            k for k in _flat_params if "actor_mean" in k or "critic_value" in k
         )
 
         def _is_last_layer(path_str):
@@ -1203,12 +1301,15 @@ def experiment(rng, config: TrainConfig):
             fresh_opt_state = tx.init(new_params)
             new_opt_state = jax.tree_util.tree_map_with_path(
                 lambda path, fresh_val, old_val: (
-                    fresh_val if any(
-                        (hasattr(k, "key") and (
-                            "actor_mean" in k.key or "critic_value" in k.key
-                        ))
+                    fresh_val
+                    if any(
+                        (
+                            hasattr(k, "key")
+                            and ("actor_mean" in k.key or "critic_value" in k.key)
+                        )
                         for k in path
-                    ) else old_val
+                    )
+                    else old_val
                 ),
                 fresh_opt_state,
                 train_state.opt_state,
@@ -1223,16 +1324,20 @@ def experiment(rng, config: TrainConfig):
     # Shrink and Perturb: shrink all params towards zero and add Gaussian noise,
     # then reinitialize optimizer state.  Guarded by `config.use_shrink_and_perturb`.
     if config.use_shrink_and_perturb:
+
         def _shrink_and_perturb(train_state, rng):
             """Apply shrink-and-perturb to all network parameters."""
-            rng, noise_rng = jax.random.split(rng)
+            rng, subkey = jax.random.split(rng)
 
-            def sp(path, p):
-                leaf_rng = jax.random.fold_in(noise_rng, _keypath_crc32(path))
-                noise = jax.random.normal(leaf_rng, shape=p.shape, dtype=p.dtype)
+            leaves, treedef = jax.tree_util.tree_flatten(train_state.params)
+            leaf_keys = jax.random.split(subkey, len(leaves))
+            keys_tree = jax.tree_util.tree_unflatten(treedef, leaf_keys)
+
+            def sp(k, p):
+                noise = jax.random.normal(k, shape=p.shape, dtype=p.dtype)
                 return p * config.shrink_factor + noise * config.noise_scale
 
-            new_params = jax.tree_util.tree_map_with_path(sp, train_state.params)
+            new_params = jax.tree_util.tree_map(sp, keys_tree, train_state.params)
 
             # Reinitialize optimizer state for the perturbed parameters
             new_opt_state = tx.init(new_params)
@@ -1242,6 +1347,40 @@ def experiment(rng, config: TrainConfig):
                 opt_state=new_opt_state,
             )
             return train_state, rng
+
+    # NTK / churn metrics: collect a fixed batch of reference observations from a
+    # short random-policy rollout.  This branches off the env at its reset state
+    # via a derived key (rng is not consumed, so the training stream is
+    # unaffected) and the rollout's terminal state is discarded.  `reward_dim`
+    # is the width of the `last_reward` feature (1, or 1 + hint_dim for hint
+    # envs), needed to build zero-padded reference obs tuples.
+    reward_dim = hint_shape[0]
+    if config.compute_ntk:
+        ref_rng = jax.random.fold_in(rng, 7919)
+
+        def _ref_step(carry, _):
+            r, st = carry
+            r, a_rng, s_rng = jax.random.split(r, 3)
+            ref_action = jax.random.randint(a_rng, (), 0, action_dim)
+            ref_obs, st, _, _, _ = env.step(s_rng, st, ref_action, env.default_params)
+            ref_img = ref_obs["image"] if isinstance(ref_obs, Mapping) else ref_obs
+            return (r, st), ref_img
+
+        (_, _), x_ref = jax.lax.scan(
+            _ref_step, (ref_rng, env_state), None, length=config.n_ref
+        )
+    else:
+        x_ref = None
+
+    # Weight-drift reference: a frozen copy of theta_0 for the ||theta - theta_0||
+    # metric.  Deliberately independent of `use_l2_init` (which only allocates
+    # `initial_params` when the mitigation is on) so drift is measurable for the
+    # vanilla agent too -- enabling an apples-to-apples vanilla-vs-w0-reg compare.
+    # Closed over by experiment_step like `x_ref`; never threaded through carry.
+    if config.compute_weight_drift:
+        drift_w0 = jax.tree_util.tree_map(lambda p: p.copy(), network_params)
+    else:
+        drift_w0 = None
 
     env_step_state = (
         train_state,
@@ -1257,7 +1396,9 @@ def experiment(rng, config: TrainConfig):
         init_hstate,
     )
 
-    @scan_tqdm(config.num_updates, print_rate=min(100, config.num_updates//20))
+    @scan_tqdm(
+        config.num_updates, print_rate=max(1, min(100, config.num_updates // 20))
+    )
     def experiment_step(carry, iteration_idx):
         env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers, pers_ema = carry
         (
@@ -1463,6 +1604,12 @@ def experiment(rng, config: TrainConfig):
             should_update, update_step, skip_update, update_state
         )
 
+        # Capture params around the PPO update for per-update churn.  Taken
+        # before the (rare) reset / shrink-and-perturb interventions below so
+        # churn reflects the gradient update itself, not those resets.
+        ntk_params_before = update_state[0].params
+        ntk_params_after = train_state.params
+
         # Periodically reset last layer (actor_mean + critic_value) params and optimizer
         # states.  Guarded at trace time by config.use_reset so no overhead when disabled.
         if config.use_reset:
@@ -1490,6 +1637,75 @@ def experiment(rng, config: TrainConfig):
                 train_state,
                 rng,
             )
+
+        # NTK rank / condition number and per-update churn for the value and
+        # policy heads, evaluated on the fixed reference batch whenever this
+        # update's env-step window crosses a multiple of ntk_freq.  ntk_freq is
+        # in *env steps* (matching the DQN ntk_freq and this file's
+        # reset_interval / sp_interval), but metrics can only be produced at
+        # update boundaries, so the finest achievable spacing is rollout_steps.
+        # lax.cond skips the (expensive) Jacobian work on non-metric updates;
+        # disabled updates / heads report NaN.  Emitted as per-update scalars.
+        if config.compute_ntk:
+
+            def _do_ntk(_):
+                assert x_ref is not None  # always an array when compute_ntk is True
+                return compute_ppo_metrics(
+                    train_state.apply_fn,
+                    ntk_params_before,
+                    ntk_params_after,
+                    init_hstate,
+                    x_ref,
+                    action_dim,
+                    reward_dim,
+                    config.chunked_ref,
+                    compute_value=True,
+                    compute_policy=True,
+                )
+
+            is_metric_step = _crossed_interval(
+                start_timestep, log_env_state.timestep, config.ntk_freq
+            )
+            ntk_metrics = jax.lax.cond(
+                is_metric_step, _do_ntk, lambda _: nan_ppo_metrics(), operand=None
+            )
+        else:
+            ntk_metrics = nan_ppo_metrics()
+
+        # Weight norm: global L2 norm of the post-update params, gated on its own
+        # weight_norm_freq (independent of the NTK cadence above).  Cheap -- no
+        # reference batch or Jacobian -- so this is just an L2 reduction over the
+        # param tree.  NaN on non-metric updates / when disabled.  Per-update scalar.
+        if config.compute_weight_norm:
+            is_wn_step = _crossed_interval(
+                start_timestep, log_env_state.timestep, config.weight_norm_freq
+            )
+            weight_norm_metric = jax.lax.cond(
+                is_wn_step,
+                lambda _: weight_norm(ntk_params_after),
+                lambda _: nan_weight_norm(),
+                operand=None,
+            )
+        else:
+            weight_norm_metric = nan_weight_norm()
+
+        # Weight drift: ||theta - theta_0|| (split pi / vf / total), gated on its
+        # own weight_drift_freq.  Like the weight norm it is a pure L2 reduction
+        # over the post-update params -- here against the frozen theta_0 closure
+        # `drift_w0` -- so no reference batch / Jacobian.  NaN triple on
+        # non-metric updates / when disabled.  Per-update scalars.
+        if config.compute_weight_drift:
+            is_wd_step = _crossed_interval(
+                start_timestep, log_env_state.timestep, config.weight_drift_freq
+            )
+            weight_drift_metric = jax.lax.cond(
+                is_wd_step,
+                lambda _: weight_drift(ntk_params_after, drift_w0, labels),
+                lambda _: nan_weight_drift(),
+                operand=None,
+            )
+        else:
+            weight_drift_metric = nan_weight_drift()
 
         # Collect a scalar reward summary for this iteration (mean reward over rollout)
         rewards = traj_batch.reward
@@ -1545,6 +1761,9 @@ def experiment(rng, config: TrainConfig):
             biome_rank,
             metrics,
             grad_norms,
+            ntk_metrics,
+            weight_norm_metric,
+            weight_drift_metric,
         )
 
     # Run training loop with lax.scan (collect per-iteration rewards)
@@ -1555,8 +1774,20 @@ def experiment(rng, config: TrainConfig):
         PBar(id=config.id, carry=init_carry),
         xs=jnp.arange(int(config.num_updates)),
     )
-    (rewards, pos, loss_info, biome_id, object_collected_id,
-     biome_regret, biome_rank, metrics, grad_norms) = info
+    (
+        rewards,
+        pos,
+        loss_info,
+        biome_id,
+        object_collected_id,
+        biome_regret,
+        biome_rank,
+        metrics,
+        grad_norms,
+        ntk_metrics,
+        weight_norm_metric,
+        weight_drift_metric,
+    ) = info
     rewards = rewards.reshape((-1))
     pos = pos.reshape((-1, pos.shape[-1]))
     total_loss = jnp.mean(loss_info[0], axis=(-1, -2))
@@ -1575,6 +1806,19 @@ def experiment(rng, config: TrainConfig):
     # metrics is a dict {column_name: (num_updates,) array} of plasticity
     # metrics (eff_rank / saturation / dormancy / persistent variants), the set
     # of keys depending on the agent.
+    # Per-update NTK / churn metrics, one scalar per update (NaN on non-metric
+    # updates).  Kept at per-update resolution; consumers subsample as needed.
+    (
+        value_ntk_rank,
+        value_ntk_eff_rank,
+        value_ntk_cond,
+        value_churn,
+        policy_ntk_rank,
+        policy_ntk_eff_rank,
+        policy_ntk_cond,
+        policy_churn,
+    ) = ntk_metrics
+    weight_drift_pi, weight_drift_vf, weight_drift_total = weight_drift_metric
     env_step_state = last_carry.carry[0]
     frames = env_step_state[2].frames
     return (
@@ -1586,6 +1830,18 @@ def experiment(rng, config: TrainConfig):
         biome_regret,
         biome_rank,
         metrics,
+        (
+            value_ntk_rank,
+            value_ntk_eff_rank,
+            value_ntk_cond,
+            value_churn,
+            policy_ntk_rank,
+            policy_ntk_eff_rank,
+            policy_ntk_cond,
+            policy_churn,
+        ),
+        weight_norm_metric,
+        (weight_drift_pi, weight_drift_vf, weight_drift_total),
         frames,
         grad_norms,
         grad_nparams,
@@ -1689,11 +1945,40 @@ def main():
             num_updates = args.max_steps
         reset_interval = hypers.get("reset_interval", hypers.get("reset_steps", -1))
         sp_interval = hypers.get("sp_interval", hypers.get("sp_steps", -1))
+        # NTK / churn metrics: only computed when experiment.ntk_freq is set.
+        # ntk_freq is in env steps (like the DQN ntk_freq), but metrics can only
+        # be emitted at update boundaries, so the effective spacing is rounded
+        # up to a multiple of rollout_steps.
+        ntk_freq = int(hypers.get("experiment", {}).get("ntk_freq", 0))
+        compute_ntk = ntk_freq > 0
+        n_ref = int(hypers.get("experiment", {}).get("x_ref_steps", 128))
+        # Row-chunk size for the memory-bounded NTK Gram build; result-invariant,
+        # only trades peak memory against recompute.  Defaults to n_ref // 4.
+        chunked_ref = int(
+            hypers.get("experiment", {}).get("chunked_ref", max(n_ref // 4, 1))
+        )
+        chunked_ref = max(min(chunked_ref, n_ref), 1)
+        # Weight norm: independent of the NTK metrics, controlled by its own
+        # experiment.weight_norm_freq (env steps, rounded up to rollout_steps).
+        weight_norm_freq = int(hypers.get("experiment", {}).get("weight_norm_freq", 0))
+        compute_weight_norm = weight_norm_freq > 0
+        # Weight drift (||theta - theta_0||): independent of the NTK / weight-norm
+        # metrics, controlled by its own experiment.weight_drift_freq (env steps,
+        # rounded up to rollout_steps).
+        weight_drift_freq = int(
+            hypers.get("experiment", {}).get("weight_drift_freq", 0)
+        )
+        compute_weight_drift = weight_drift_freq > 0
+        activation = str(
+            hypers.get("representation", {}).get("activation", "tanh")
+        ).lower()
+        if "crelu" in exp.agent.lower():
+            activation = "crelu"
         config = TrainConfig(
             d_hidden=int(hypers["representation"]["d_hidden"]),
             agent_type=exp.agent,
-            activation=str(hypers["representation"].get("activation", "tanh")),
             hidden_size=int(hypers["representation"]["hidden"]),
+            activation=activation,
             rollout_steps=int(hypers["rollout_steps"]),
             epochs=int(hypers["epochs"]),
             num_mini_batch=int(hypers["num_mini_batch"]),
@@ -1742,7 +2027,12 @@ def main():
             sparsity=hypers["representation"].get("sparsity", None),
             spectral_radius=hypers["representation"].get("spectral_radius", None),
             use_sinusoidal_encoding=bool(hypers.get("use_sinusoidal_encoding", False)),
-            use_reward_trace=bool(hypers.get("use_reward_trace", hypers.get("representation", {}).get("use_reward_trace", False))),
+            use_reward_trace=bool(
+                hypers.get(
+                    "use_reward_trace",
+                    hypers.get("representation", {}).get("use_reward_trace", False),
+                )
+            ),
             use_hint_trace=bool("_HT" in exp.agent),
             use_layernorm=bool(
                 hypers.get(
@@ -1750,8 +2040,16 @@ def main():
                     hypers.get("representation", {}).get("use_layernorm", False),
                 )
             ),
+            use_middle_layer=bool(
+                hypers.get("representation", {}).get("use_middle_layer", True)
+            ),
             conv=str(hypers.get("representation", {}).get("conv", "Conv2D")),
-            reward_trace_decay=float(hypers.get("reward_trace_decay", 1.0)),
+            reward_trace_decay=float(
+                hypers.get(
+                    "reward_trace_decay",
+                    hypers.get("representation", {}).get("reward_trace_decay", 1.0),
+                )
+            ),
             sat_persist_decay=float(hypers.get("sat_persist_decay", 0.99)),
             sat_persist_threshold=float(hypers.get("sat_persist_threshold", 0.95)),
             num_updates=num_updates,
@@ -1781,6 +2079,14 @@ def main():
             sp_interval=int(sp_interval),
             shrink_factor=float(hypers.get("shrink_factor", 1.0)),
             noise_scale=float(hypers.get("noise_scale", 0.0)),
+            compute_ntk=compute_ntk,
+            ntk_freq=max(ntk_freq, 1),
+            n_ref=n_ref,
+            chunked_ref=chunked_ref,
+            compute_weight_norm=compute_weight_norm,
+            weight_norm_freq=max(weight_norm_freq, 1),
+            compute_weight_drift=compute_weight_drift,
+            weight_drift_freq=max(weight_drift_freq, 1),
         )
         configs.append(config)
 
@@ -1797,6 +2103,18 @@ def main():
         biome_regret,
         biome_rank,
         metrics,
+        (
+            value_ntk_rank,
+            value_ntk_eff_rank,
+            value_ntk_cond,
+            value_churn,
+            policy_ntk_rank,
+            policy_ntk_eff_rank,
+            policy_ntk_cond,
+            policy_churn,
+        ),
+        weight_norm_metric,
+        (weight_drift_pi, weight_drift_vf, weight_drift_total),
         frames,
         grad_norms,
         grad_nparams,
@@ -1828,6 +2146,18 @@ def main():
         run_biome_rank = biome_rank[i]
         # All plasticity columns for this run, keyed by name (agent-dependent).
         run_metrics = {k: v[i] for k, v in metrics.items()}
+        run_value_ntk_rank = value_ntk_rank[i]
+        run_value_ntk_eff_rank = value_ntk_eff_rank[i]
+        run_value_ntk_cond = value_ntk_cond[i]
+        run_value_churn = value_churn[i]
+        run_policy_ntk_rank = policy_ntk_rank[i]
+        run_policy_ntk_eff_rank = policy_ntk_eff_rank[i]
+        run_policy_ntk_cond = policy_ntk_cond[i]
+        run_policy_churn = policy_churn[i]
+        run_weight_norm = weight_norm_metric[i]
+        run_weight_drift_pi = weight_drift_pi[i]
+        run_weight_drift_vf = weight_drift_vf[i]
+        run_weight_drift_total = weight_drift_total[i]
         run_frames = frames[i]
         start_time = time.time()
         # for reward in run_rewards:
@@ -1887,6 +2217,18 @@ def main():
             biome_regret=run_biome_regret,
             biome_rank=run_biome_rank,
             **run_metrics,
+            value_ntk_rank=run_value_ntk_rank,
+            value_ntk_eff_rank=run_value_ntk_eff_rank,
+            value_ntk_cond=run_value_ntk_cond,
+            value_churn=run_value_churn,
+            policy_ntk_rank=run_policy_ntk_rank,
+            policy_ntk_eff_rank=run_policy_ntk_eff_rank,
+            policy_ntk_cond=run_policy_ntk_cond,
+            policy_churn=run_policy_churn,
+            weight_norm=run_weight_norm,
+            weight_drift_pi=run_weight_drift_pi,
+            weight_drift_vf=run_weight_drift_vf,
+            weight_drift_total=run_weight_drift_total,
             **run_grad_norm_kwargs,
         )
         total_numpy_time += time.time() - start_time
