@@ -6,7 +6,7 @@
         "environment": {
             "env_id": "ForagaxSquareWaveTwoBiome-v11",
             "aperture_size": 9,
-            "observation_type": "color"
+            "observation_type": "rgb"
         },
         "experiment": {
             "seed_offset": 1000000
