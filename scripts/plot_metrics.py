@@ -73,8 +73,10 @@ def main():
     # `*_ntk_eff_rank`, no condition number).  Only the columns actually present in
     # the loaded data are plotted, so this works unchanged for either agent (or a
     # mix), drawing one line per available series.
-    # Panels are laid out on a grid by their `row`: row 0 holds the churn / NTK
-    # metrics, row 1 holds the weight metrics.  Unused cells in a shorter row are
+    # Panels are laid out on a grid by their `row`: row 0 holds the NTK metrics,
+    # row 1 holds the churn and weight metrics.  Value churn (relative magnitude)
+    # and policy churn (KL divergence) have different units, so they get separate
+    # panels rather than sharing one axis.  Unused cells in a shorter row are
     # hidden.
     PANELS = [
         {
@@ -102,7 +104,7 @@ def main():
         {
             "row": 0,
             "ylabel": "NTK Effective Rank",
-            "title": "NTK Effective (Stable) Rank Over Time",
+            "title": "NTK Effective Rank Over Time",
             "log": False,
             "series": [
                 ("value_ntk_eff_rank", "Value (PPO)"),
@@ -110,14 +112,42 @@ def main():
             ],
         },
         {
-            "row": 1,
-            "ylabel": "Churn Norm",
-            "title": "Churn Over Time",
+            "row": 0,
+            "ylabel": "Weight Drift",
+            "title": "Weight Drift Over Time",
             "log": False,
             "series": [
-                ("churn_norm", "DQN"),
-                ("value_churn", "Value (PPO)"),
-                ("policy_churn", "Policy (PPO)"),
+                ("weight_drift_total", "Total (PPO)"),
+                ("weight_drift_pi", "Actor (PPO)"),
+                ("weight_drift_vf", "Critic (PPO)"),
+            ],
+        },
+        {
+            "row": 1,
+            "ylabel": "Relative Value Churn",
+            "title": "Value Churn Over Time",
+            "log": False,
+            "series": [
+                ("churn_norm", "DQN (raw)"),
+                ("value_churn", "Critic (PPO)"),
+            ],
+        },
+        {
+            "row": 1,
+            "ylabel": "Policy Churn (KL)",
+            "title": "Policy Churn (KL divergence) Over Time",
+            "log": False,
+            "series": [
+                ("policy_churn", "Actor (PPO)"),
+            ],
+        },
+        {
+            "row": 1,
+            "ylabel": "Weight Update Norm",
+            "title": "Weight Update Norm Over Time",
+            "log": False,
+            "series": [
+                ("weight_update_norm", "PPO"),
             ],
         },
         {
@@ -127,17 +157,6 @@ def main():
             "log": False,
             "series": [
                 ("weight_norm", "PPO"),
-            ],
-        },
-        {
-            "row": 1,
-            "ylabel": "Weight Drift",
-            "title": "Weight Drift Over Time",
-            "log": False,
-            "series": [
-                ("weight_drift_total", "Total (PPO)"),
-                ("weight_drift_pi", "Actor (PPO)"),
-                ("weight_drift_vf", "Critic (PPO)"),
             ],
         },
     ]
@@ -263,7 +282,9 @@ def main():
                     power = int(np.log10(scale))
 
                 # Format ticks with the scale
-                ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, p: f"{x/scale:.10g}"))
+                ax.xaxis.set_major_formatter(
+                    ticker.FuncFormatter(lambda x, p: f"{x / scale:.10g}")
+                )
                 ax.set_xlabel(f"Time steps ($\\times 10^{{{power}}}$)")
             else:
                 ax.set_xlabel("Step")

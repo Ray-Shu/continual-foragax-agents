@@ -16,10 +16,30 @@ Two heads are measured separately:
 * **policy (actor)** -- the ``action_dim`` policy logits.
 
 For each head we report the NTK Gram-matrix discrete (hard) rank and effective
-(stable) rank, plus the per-update *churn*: the norm of the change in the head's
+(stable) rank, plus the per-update *churn* -- the change in the head's
 predictions on a fixed reference batch from immediately before to immediately
-after one PPO update.  The Gram is built in row-chunks (see ``_gram_chunked``) so
-peak memory is bounded by the chunk size rather than the reference-set size.
+after one PPO update.  The two heads use the churn measure appropriate to their
+output, matching C-CHAIN's PPO churn definitions:
+
+* **value (critic)** -- *scale-invariant MSE* churn ``mean((v_after -
+  v_before)^2) / (mean(v_before^2) + eps)``.  The numerator is C-CHAIN's value
+  churn (``(Δv).pow(2).mean()``); dividing by the value-output power makes it
+  invariant to the absolute scale of the value output (which drifts across tasks
+  in the non-stationary setting), so the trend reflects how much the value
+  function *moved*, not how large its outputs happen to be.
+* **policy (actor)** -- the mean *KL divergence*
+  ``KL(pi_before || pi_after)`` of the action distribution.  Operating on the
+  distribution rather than the raw logits makes it invariant to the softmax
+  logit gauge: logit shifts/rescalings that leave the policy unchanged
+  contribute zero churn.
+
+We additionally report the head-independent *weight update norm*
+``||theta_after - theta_before||`` -- a per-update "is the network still moving"
+signal, distinct from the weight *norm* (its magnitude) and weight *drift*
+(cumulative distance from init).
+
+The Gram is built in row-chunks (see ``_gram_chunked``) so peak memory is bounded
+by the chunk size rather than the reference-set size.
 """
 
 from typing import Any, Callable, Tuple
@@ -225,10 +245,14 @@ def value_metrics(
     """NTK rank / effective rank / condition number and per-update churn for the value head.
 
     NTK is measured on the post-update parameters (the network's current state,
-    matching the DQN convention).  Churn is the norm of the value change on
-    ``x_ref`` from ``params_before`` to ``params_after``.  ``chunk`` is the
-    row-chunk size for the memory-bounded Gram build; it changes only peak memory
-    / speed, not the result.
+    matching the DQN convention).  Churn is the *scale-invariant MSE* of the
+    value change on ``x_ref`` from ``params_before`` to ``params_after``:
+    ``mean((v_after - v_before)^2) / (mean(v_before^2) + eps)`` -- C-CHAIN's
+    ``(Δv).pow(2).mean()`` value churn normalized by the value-output power, which
+    removes the absolute value-output scale (it drifts across tasks) so the trend
+    reflects how much the value function moved.  ``chunk`` is the row-chunk size
+    for the memory-bounded Gram build; it changes only peak memory / speed, not
+    the result.
 
     Returns:
         ``(rank, eff_rank, cond, churn)`` as scalar arrays.
@@ -239,31 +263,22 @@ def value_metrics(
         _, _, value = apply_fn(params, init_hstate, obs)
         return value[0:1]  # (1,) so the Gram builder sees a uniform m-vector head
 
-    # Per-sample predictions before / after the update -> churn numerator.
+    # Per-sample value predictions before / after the update.
     pred_before = jax.vmap(value_of, in_axes=(None, 0))(params_before, x_ref)
     pred_after = jax.vmap(value_of, in_axes=(None, 0))(params_after, x_ref)
 
     # NTK on the current (post-update) params; Gram built in row-chunks.
     ntk = _gram_chunked(value_of, params_after, x_ref, chunk, m=1)
     rank, eff_rank, cond = _ntk_rank_eff_cond(ntk)
-    churn_numerator = jnp.linalg.norm(pred_after - pred_before)
 
-    # Gradient-norm aggregate ||J||_F = sqrt(trace(J Jᵀ)) -- read straight off the
-    # Gram diagonal, so the full Jacobian is never materialized.
-    grad_norm_aggregate = jnp.sqrt(jnp.trace(ntk))
-
-    # Weight update norm: ||ΔΘ|| = ||params_after - params_before||
-    leaves_before = jax.tree_util.tree_leaves(params_before)
-    leaves_after = jax.tree_util.tree_leaves(params_after)
-    delta_leaves = [
-        jnp.sum(jnp.square(a - b)) for a, b in zip(leaves_after, leaves_before)
-    ]
-    weight_update_norm = jnp.sqrt(sum(delta_leaves, 0.0))
-
-    # Relative churn: bounded [0, 1] by Cauchy-Schwarz.
-    # Add small epsilon to avoid division by zero when network is completely plastic.
+    # Scale-invariant MSE churn: C-CHAIN's value churn ``mean((v_after -
+    # v_before)^2)`` normalized by the value-output power ``mean(v_before^2)``.
+    # Numerator and denominator share units (value^2), so the ratio is
+    # dimensionless and invariant under rescaling of the value output (v -> a*v).
     eps = 1e-8
-    churn = churn_numerator / (grad_norm_aggregate * weight_update_norm + eps)
+    mse = jnp.mean(jnp.square(pred_after - pred_before))
+    scale = jnp.mean(jnp.square(pred_before))
+    churn = mse / (scale + eps)
 
     return rank, eff_rank, cond, churn
 
@@ -282,11 +297,12 @@ def policy_metrics(
 
     The policy output is the ``action_dim`` logit vector, so the Jacobian has
     ``n_ref * action_dim`` rows (and the rank ceiling is correspondingly
-    ``action_dim`` times the value head's).  Churn is measured on the action
-    probabilities (softmax of the logits), the interpretable notion of how much
-    the policy moved on the reference set in one update.  ``chunk`` is the
-    row-chunk size for the memory-bounded Gram build; it changes only peak memory
-    / speed, not the result.
+    ``action_dim`` times the value head's).  Churn is the mean KL divergence
+    ``KL(pi_before || pi_after)`` of the action distribution on ``x_ref`` over one
+    update -- the distributional measure C-CHAIN uses for the actor.  Operating on
+    the distribution rather than the logits makes it invariant to the softmax
+    logit gauge.  ``chunk`` is the row-chunk size for the memory-bounded Gram
+    build; it changes only peak memory / speed, not the result.
 
     Returns:
         ``(rank, eff_rank, cond, churn)`` as scalar arrays.
@@ -302,31 +318,21 @@ def policy_metrics(
         _, pi, _ = apply_fn(params, init_hstate, obs)
         return pi.probs[0]  # (action_dim,)
 
-    pred_before = jax.vmap(probs_of, in_axes=(None, 0))(params_before, x_ref)
-    pred_after = jax.vmap(probs_of, in_axes=(None, 0))(params_after, x_ref)
-    churn_numerator = jnp.linalg.norm(pred_after - pred_before)
+    p_before = jax.vmap(probs_of, in_axes=(None, 0))(params_before, x_ref)
+    p_after = jax.vmap(probs_of, in_axes=(None, 0))(params_after, x_ref)
 
     # NTK on the current (post-update) params; Gram built in row-chunks, each
     # sample contributing action_dim rows.
     ntk = _gram_chunked(logits_of, params_after, x_ref, chunk, m=action_dim)
     rank, eff_rank, cond = _ntk_rank_eff_cond(ntk)
 
-    # Gradient-norm aggregate ||J||_F = sqrt(trace(J Jᵀ)) -- read straight off the
-    # Gram diagonal, so the full Jacobian is never materialized.
-    grad_norm_aggregate = jnp.sqrt(jnp.trace(ntk))
-
-    # Weight update norm: ||ΔΘ|| = ||params_after - params_before||
-    leaves_before = jax.tree_util.tree_leaves(params_before)
-    leaves_after = jax.tree_util.tree_leaves(params_after)
-    delta_leaves = [
-        jnp.sum(jnp.square(a - b)) for a, b in zip(leaves_after, leaves_before)
-    ]
-    weight_update_norm = jnp.sqrt(sum(delta_leaves, 0.0))
-
-    # Relative churn: bounded [0, 1] by Cauchy-Schwarz.
-    # Add small epsilon to avoid division by zero.
+    # Mean KL(p_before || p_after) over the reference batch.  eps keeps the logs
+    # finite for zero-probability actions.
     eps = 1e-8
-    churn = churn_numerator / (grad_norm_aggregate * weight_update_norm + eps)
+    kl = jnp.sum(
+        p_before * (jnp.log(p_before + eps) - jnp.log(p_after + eps)), axis=-1
+    )
+    churn = jnp.mean(kl)
 
     return rank, eff_rank, cond, churn
 
@@ -366,7 +372,8 @@ def compute_ppo_metrics(
 
     Returns:
         ``(value_rank, value_eff_rank, value_cond, value_churn, policy_rank,
-        policy_eff_rank, policy_cond, policy_churn)`` as scalar arrays.
+        policy_eff_rank, policy_cond, policy_churn, weight_update_norm)`` as
+        scalar arrays.
     """
     nan = jnp.float32(jnp.nan)
 
@@ -398,10 +405,30 @@ def compute_ppo_metrics(
     else:
         p_rank, p_eff_rank, p_cond, p_churn = nan, nan, nan, nan
 
-    return v_rank, v_eff_rank, v_cond, v_churn, p_rank, p_eff_rank, p_cond, p_churn
+    # Head-independent per-update weight update norm ||theta_after - theta_before||.
+    leaves_before = jax.tree_util.tree_leaves(params_before)
+    leaves_after = jax.tree_util.tree_leaves(params_after)
+    weight_update_norm = jnp.sqrt(
+        sum(
+            (jnp.sum(jnp.square(a - b)) for a, b in zip(leaves_after, leaves_before)),
+            0.0,
+        )
+    )
+
+    return (
+        v_rank,
+        v_eff_rank,
+        v_cond,
+        v_churn,
+        p_rank,
+        p_eff_rank,
+        p_cond,
+        p_churn,
+        weight_update_norm,
+    )
 
 
 def nan_ppo_metrics() -> Tuple[jnp.ndarray, ...]:
     """The all-``NaN`` NTK / churn metric tuple emitted on non-metric updates."""
     nan = jnp.float32(jnp.nan)
-    return nan, nan, nan, nan, nan, nan, nan, nan
+    return nan, nan, nan, nan, nan, nan, nan, nan, nan
