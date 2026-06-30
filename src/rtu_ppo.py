@@ -136,6 +136,9 @@ class TrainConfig:
     # cadence / flag; the diagnostic counterpart to L2-to-init ("w0") reg.
     compute_weight_drift: bool = struct.field(pytree_node=False)
     weight_drift_freq: int = struct.field(pytree_node=False)
+    # Plasticity probes (effective rank / dormancy / saturation). Explicit on/off
+    # flag; probing additionally requires a probe-instrumented class (_is_probed).
+    compute_plasticity: bool = struct.field(pytree_node=False)
     # ---- DYNAMIC (may vary per idx; arithmetic only) ----
     max_grad_norm: float
     l2_reg_pi: float
@@ -154,8 +157,9 @@ class TrainConfig:
 
     id: int
     reward_trace_decay: float
-    sat_persist_decay: float
+    persist_decay: float
     sat_persist_threshold: float
+    dormant_threshold: float
     gamma: float
     gae_lambda: float
     clip_eps: float
@@ -219,12 +223,24 @@ class Interaction(NamedTuple):
 # Expectations are estimated as sample means over the rollout's collapsed
 # (T·B, H) activation matrix — Monte Carlo for E_{x∼D_rollout}.
 # ----------------------------------------------------------------------------
-# MLP/RTU agents that carry the plasticity probes. tanh and ReLU share a class
-# and differ only by representation.activation, but keep distinct agent names
-# (the agent field is the results-folder key, results/{name}/{env}/{agent}/...).
-_RTU_MLP_AGENTS = ("RealTimeActorCriticMLP", "RealTimeActorCriticMLPReLU")
-_VANILLA_MLP_AGENTS = ("ActorCriticMLP", "ActorCriticMLPReLU")
-_PROBED_AGENTS = _RTU_MLP_AGENTS + _VANILLA_MLP_AGENTS
+# Network classes that carry the plasticity sow() probes. Probe-eligibility is
+# decided by the resolved class (via the registry), NOT by exact agent name, so
+# every suffixed variant (ActorCriticMLP-l2, ActorCriticMLP_relu_2, ...) and any
+# activation (tanh/relu/crelu) is covered uniformly.
+_PROBED_CLASSES = (ActorCriticMLP, RealTimeActorCriticMLP)
+
+
+def _is_probed(agent_type):
+    """True iff agent_type resolves to a probe-instrumented MLP/RTU-MLP class."""
+    try:
+        return getAgent(agent_type) in _PROBED_CLASSES
+    except Exception:
+        return False
+
+
+def _should_probe(config):
+    """Probing runs iff explicitly enabled AND the class carries probes."""
+    return config.compute_plasticity and _is_probed(config.agent_type)
 
 
 def _agent_is_rtu(agent_type):
@@ -232,11 +248,13 @@ def _agent_is_rtu(agent_type):
     return agent_type.startswith("RealTime")
 
 
-def _relu_wide_intermediate(agent_type):
-    """Name of the sown intermediate for the wide middle layer of a ReLU net:
-    the RTU output for the recurrent net, the wide Dense ('mid') for the MLP.
-    Both are emitted into the unified '*_rtu' metric column."""
-    return "rtu_out" if _agent_is_rtu(agent_type) else "mid"
+def _wide_site_name(config):
+    """Sown intermediate for the wide middle layer, or None when it is absent.
+    RTU nets always have it (rtu_out); a vanilla MLP has the wide Dense ('mid')
+    only when use_middle_layer is set. Emitted into the unified '*_rtu' column."""
+    if _agent_is_rtu(config.agent_type):
+        return "rtu_out"
+    return "mid" if config.use_middle_layer else None
 
 
 def _effective_rank(activation):
@@ -268,7 +286,7 @@ def _saturation_rate(pre_activation, threshold=0.95):
     return jnp.mean(jnp.abs(mean_tanh) > threshold).astype(jnp.float32)
 
 
-def _compute_plasticity_metrics(params, apply_fn, init_hstate, traj_obs):
+def _compute_plasticity_metrics(params, apply_fn, init_hstate, traj_obs, dormant_threshold=0.025):
     """RTU (tanh) plasticity metrics as a {column_name: scalar} dict from one
     extra forward pass: effective rank at pre1/rtu/pre2, signed saturation rate
     at the tanh sites (pre1/pre2), Sokar dormant fraction at the post-ReLU RTU
@@ -290,12 +308,12 @@ def _compute_plasticity_metrics(params, apply_fn, init_hstate, traj_obs):
         "sat_rate_critic_pre1": _saturation_rate(c_pre1),
         "sat_rate_actor_pre2": _saturation_rate(a_pre2),
         "sat_rate_critic_pre2": _saturation_rate(c_pre2),
-        "dormant_actor_rtu": _dormant_fraction(a_rtu),
-        "dormant_critic_rtu": _dormant_fraction(c_rtu),
+        "dormant_actor_rtu": _dormant_fraction(a_rtu, dormant_threshold),
+        "dormant_critic_rtu": _dormant_fraction(c_rtu, dormant_threshold),
     }
 
 
-def _compute_plasticity_metrics_mlp(params, apply_fn, init_hstate, traj_obs):
+def _compute_plasticity_metrics_mlp(params, apply_fn, init_hstate, traj_obs, has_mid=True):
     """Vanilla ActorCriticMLP analogue of _compute_plasticity_metrics.
 
     ActorCriticMLP is feedforward and all-tanh, with a linear wide layer
@@ -316,27 +334,31 @@ def _compute_plasticity_metrics_mlp(params, apply_fn, init_hstate, traj_obs):
     _, state = apply_fn(params, init_hstate, traj_obs, mutable=["intermediates"])
     inter = state["intermediates"]
     a_pre1, c_pre1 = inter["actor_pre1"][0], inter["critic_pre1"][0]
-    a_mid, c_mid = inter["actor_mid"][0], inter["critic_mid"][0]
     a_pre2, c_pre2 = inter["actor_pre2"][0], inter["critic_pre2"][0]
     nan = jnp.float32(jnp.nan)
-    return {
+    out = {
         "eff_rank_actor_pre1": _effective_rank(a_pre1),
         "eff_rank_critic_pre1": _effective_rank(c_pre1),
-        "eff_rank_actor_rtu": _effective_rank(a_mid),
-        "eff_rank_critic_rtu": _effective_rank(c_mid),
         "eff_rank_actor_pre2": _effective_rank(a_pre2),
         "eff_rank_critic_pre2": _effective_rank(c_pre2),
         "sat_rate_actor_pre1": _saturation_rate(a_pre1),
         "sat_rate_critic_pre1": _saturation_rate(c_pre1),
         "sat_rate_actor_pre2": _saturation_rate(a_pre2),
         "sat_rate_critic_pre2": _saturation_rate(c_pre2),
-        "dormant_actor_rtu": nan,  # linear mid layer: no valid Sokar dormancy
-        "dormant_critic_rtu": nan,
     }
+    # Wide middle layer (the '*_rtu' slot): linear, so effective rank only and
+    # NaN dormancy. Absent entirely when use_middle_layer is off.
+    if has_mid:
+        out["eff_rank_actor_rtu"] = _effective_rank(inter["actor_mid"][0])
+        out["eff_rank_critic_rtu"] = _effective_rank(inter["critic_mid"][0])
+        out["dormant_actor_rtu"] = nan
+        out["dormant_critic_rtu"] = nan
+    return out
 
 
 def _compute_plasticity_metrics_relu(params, apply_fn, init_hstate, traj_obs,
-                                     wide_inter="rtu_out"):
+                                     wide_inter: str | None = "rtu_out",
+                                     dormant_threshold=0.025):
     """ReLU variant metrics dict: effective rank AND Sokar dormant fraction at
     every (post-ReLU) probe site -- pre1, the wide middle layer, pre2. No tanh
     saturation (this net has no tanh). The wide-layer activations come from
@@ -347,14 +369,15 @@ def _compute_plasticity_metrics_relu(params, apply_fn, init_hstate, traj_obs,
     inter = state["intermediates"]
     sites = {
         "actor_pre1": inter["actor_pre1"][0], "critic_pre1": inter["critic_pre1"][0],
-        "actor_rtu": inter[f"actor_{wide_inter}"][0],
-        "critic_rtu": inter[f"critic_{wide_inter}"][0],
         "actor_pre2": inter["actor_pre2"][0], "critic_pre2": inter["critic_pre2"][0],
     }
+    if wide_inter is not None:
+        sites["actor_rtu"] = inter[f"actor_{wide_inter}"][0]
+        sites["critic_rtu"] = inter[f"critic_{wide_inter}"][0]
     out = {}
     for k, h in sites.items():
         out[f"eff_rank_{k}"] = _effective_rank(h)
-        out[f"dormant_{k}"] = _dormant_fraction(h)
+        out[f"dormant_{k}"] = _dormant_fraction(h, dormant_threshold)
     return out
 
 
@@ -381,7 +404,7 @@ def _mean_tanh_sites(params, apply_fn, init_hstate, traj_obs):
 
 
 def _mean_abs_act_sites(params, apply_fn, init_hstate, traj_obs,
-                        wide_inter="rtu_out"):
+                        wide_inter: str | None = "rtu_out"):
     """Per-unit mean |activation| at the post-ReLU sites (pre1/wide/pre2), as a
     dict {site: (width,) vector}; feeds the persistent-dormancy EMA. The wide
     site reads `wide_inter` (RTU output or MLP 'mid') under the unified 'rtu'
@@ -390,9 +413,11 @@ def _mean_abs_act_sites(params, apply_fn, init_hstate, traj_obs,
     inter = state["intermediates"]
     names = {
         "actor_pre1": "actor_pre1", "critic_pre1": "critic_pre1",
-        "actor_rtu": f"actor_{wide_inter}", "critic_rtu": f"critic_{wide_inter}",
         "actor_pre2": "actor_pre2", "critic_pre2": "critic_pre2",
     }
+    if wide_inter is not None:
+        names["actor_rtu"] = f"actor_{wide_inter}"
+        names["critic_rtu"] = f"critic_{wide_inter}"
 
     def _ma(name):
         h = inter[name][0]
@@ -426,16 +451,20 @@ def _pers_ema_init(config):
     tanh nets track pre1/pre2 (hidden_size); the ReLU net also tracks the RTU
     output (2*d_hidden). Empty for agents without probes."""
     H = config.hidden_size
-    if config.agent_type not in _PROBED_AGENTS:
+    if not _should_probe(config):
         return {}
-    if config.activation == "relu":
-        # wide middle layer: RTU output (2*d_hidden) or the MLP wide Dense (d_hidden)
-        wide = 2 * config.d_hidden if _agent_is_rtu(config.agent_type) else config.d_hidden
-        return {
+    if config.activation in ("relu", "crelu"):
+        ema = {
             "actor_pre1": jnp.zeros(H), "critic_pre1": jnp.zeros(H),
-            "actor_rtu": jnp.zeros(wide), "critic_rtu": jnp.zeros(wide),
             "actor_pre2": jnp.zeros(H), "critic_pre2": jnp.zeros(H),
         }
+        wide_inter = _wide_site_name(config)
+        if wide_inter is not None:
+            # wide middle layer: RTU output (2*d_hidden) or MLP wide Dense (d_hidden)
+            wide = 2 * config.d_hidden if _agent_is_rtu(config.agent_type) else config.d_hidden
+            ema["actor_rtu"] = jnp.zeros(wide)
+            ema["critic_rtu"] = jnp.zeros(wide)
+        return ema
     return {
         "actor_pre1": jnp.zeros(H), "critic_pre1": jnp.zeros(H),
         "actor_pre2": jnp.zeros(H), "critic_pre2": jnp.zeros(H),
@@ -1516,41 +1545,47 @@ def experiment(rng, config: TrainConfig):
         # activations match what the rollout actually saw. Guarded statically on
         # agent_type; each agent returns a {column_name: scalar} plasticity dict.
         _pp = (train_state.params, train_state.apply_fn, hstate, traj_batch.obs)
-        _at = config.agent_type
-        _relu = config.activation == "relu"
-        if _at in _PROBED_AGENTS:
+        _relu = config.activation in ("relu", "crelu")
+        _probe = _should_probe(config)
+        _wide = _wide_site_name(config)
+        if _probe:
             if _relu:
-                # all-ReLU net (RTU or MLP): dormancy + effective rank at every
-                # post-ReLU site. The wide middle layer is read from the RTU
-                # output or the MLP's wide Dense, into the unified '*_rtu' column.
+                # all-ReLU/crelu net (RTU or MLP): dormancy + effective rank at
+                # every post-ReLU site. The wide middle layer (RTU output or the
+                # MLP's wide Dense) goes into the unified '*_rtu' column; it is
+                # omitted entirely for a vanilla MLP with use_middle_layer off.
                 plasticity = _compute_plasticity_metrics_relu(
-                    *_pp, wide_inter=_relu_wide_intermediate(_at)
+                    *_pp, wide_inter=_wide, dormant_threshold=config.dormant_threshold
                 )
-            elif _at in _RTU_MLP_AGENTS:
-                plasticity = _compute_plasticity_metrics(*_pp)
+            elif _agent_is_rtu(config.agent_type):
+                plasticity = _compute_plasticity_metrics(
+                    *_pp, dormant_threshold=config.dormant_threshold
+                )
             else:
-                plasticity = _compute_plasticity_metrics_mlp(*_pp)
+                plasticity = _compute_plasticity_metrics_mlp(
+                    *_pp, has_mid=_wide is not None
+                )
         else:
             plasticity = _zero_plasticity_metrics()
 
         # Persistent metric. Per rollout take the per-unit mean (signed tanh for
         # the tanh nets, |activation| for the ReLU nets), EMA it across rollouts
-        # (decay sat_persist_decay) in the pers_ema dict carry, then threshold
+        # (decay persist_decay) in the pers_ema dict carry, then threshold
         # AFTER the EMA: persistent saturation (|EMA| > 0.95) or persistent
         # dormancy (Sokar score <= 0.025). Empty for agents without probes.
-        if _at in _PROBED_AGENTS and _relu:
-            means = _mean_abs_act_sites(*_pp, wide_inter=_relu_wide_intermediate(_at))
+        if _probe and _relu:
+            means = _mean_abs_act_sites(*_pp, wide_inter=_wide)
             pers_ema = {
-                k: config.sat_persist_decay * pers_ema[k]
-                + (1.0 - config.sat_persist_decay) * means[k]
+                k: config.persist_decay * pers_ema[k]
+                + (1.0 - config.persist_decay) * means[k]
                 for k in means
             }
-            persist = _dormant_persist_from_ema(pers_ema, 0.025)
-        elif _at in _PROBED_AGENTS:
+            persist = _dormant_persist_from_ema(pers_ema, config.dormant_threshold)
+        elif _probe:
             means = _mean_tanh_sites(*_pp)
             pers_ema = {
-                k: config.sat_persist_decay * pers_ema[k]
-                + (1.0 - config.sat_persist_decay) * means[k]
+                k: config.persist_decay * pers_ema[k]
+                + (1.0 - config.persist_decay) * means[k]
                 for k in means
             }
             persist = _sat_persist_from_ema(pers_ema, config.sat_persist_threshold)
@@ -2050,8 +2085,15 @@ def main():
                     hypers.get("representation", {}).get("reward_trace_decay", 1.0),
                 )
             ),
-            sat_persist_decay=float(hypers.get("sat_persist_decay", 0.99)),
-            sat_persist_threshold=float(hypers.get("sat_persist_threshold", 0.95)),
+            persist_decay=float(
+                hypers.get("experiment", {}).get("persist_decay", 0.99)
+            ),
+            sat_persist_threshold=float(
+                hypers.get("experiment", {}).get("sat_persist_threshold", 0.95)
+            ),
+            dormant_threshold=float(
+                hypers.get("experiment", {}).get("dormant_threshold", 0.025)
+            ),
             num_updates=num_updates,
             aperture_size=int(hypers["environment"]["aperture_size"]),
             render_mode=hypers["environment"].get("render_mode", "world_reward"),
@@ -2087,6 +2129,9 @@ def main():
             weight_norm_freq=max(weight_norm_freq, 1),
             compute_weight_drift=compute_weight_drift,
             weight_drift_freq=max(weight_drift_freq, 1),
+            compute_plasticity=bool(
+                hypers.get("experiment", {}).get("compute_plasticity", False)
+            ),
         )
         configs.append(config)
 
