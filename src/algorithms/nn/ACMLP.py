@@ -93,13 +93,8 @@ class ActorCriticMLP(nn.Module):
                 bias_init=constant(0.0),
                 name="critic_dense2",
             )(critic_embedding)
-            # Wide (d_hidden) layer occupying the RTU's position. For tanh it is
-            # LINEAR (no nonlinearity between dense2 and dense3) -> probed for
-            # effective rank only. For relu it is ReLU'd here so Sokar dormancy is
-            # measurable at this site too (full parallel to the all-ReLU RTU net).
-            if self.activation == "relu":
-                actor_embedding = activation(actor_embedding)
-                critic_embedding = activation(critic_embedding)
+            actor_embedding = activation(actor_embedding)
+            critic_embedding = activation(critic_embedding)
             self.sow("intermediates", "actor_mid", actor_embedding)
             self.sow("intermediates", "critic_mid", critic_embedding)
 

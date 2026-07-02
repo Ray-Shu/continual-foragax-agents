@@ -16,6 +16,19 @@ for fov in 9; do
         --entry src/rtu_ppo.py \
         -e ${EXP}/${fov}/ActorCriticMLPReLU.json
 
+    python scripts/slurm.py \
+        --cluster clusters/vulcan-gpu-vmap-32G.json \
+        --tasks 5 --time 06:00:00 --runs 30 --force \
+        --entry src/rtu_ppo.py \
+        -e ${EXP}/${fov}/ActorCriticMLPReLU_20m.json
+
+    # PPO with tanh from original paper
+    python scripts/slurm.py \
+        --cluster clusters/vulcan-gpu-vmap-32G.json \
+        --tasks 5 --time 06:00:00 --runs 30 --force \
+        --entry src/rtu_ppo.py \
+        -e ${EXP}/${fov}/ActorCriticMLP_tanh.json
+
     # RTU-PPO (ReLU) -- the agent that should resist LOP; the comparison arm.
     python scripts/slurm.py \
         --cluster clusters/vulcan-gpu-vmap-32G.json \
