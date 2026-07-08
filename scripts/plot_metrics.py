@@ -2,10 +2,12 @@
 training, comparing one or more agents on the same axes.
 
 Like ``src/learning_curve.py``, the hue is the *agent*: pass several agents and
-each metric panel overlays one line per agent (mean over seeds), so different
-agents' metrics can be compared directly. Pass a single ``--metric`` to emit one
-figure with just that panel; pass ``--metrics a b c`` to emit an auto grid; pass
-neither to emit every metric that has data.
+each metric panel overlays one line per agent (across-seed mean) with a shaded
+95%% bootstrap CI band, so different agents' metrics can be compared directly and
+the band shows whether a trend is real or seed noise. Agent colors come from the
+same shared ``COLOR_MAP`` / Paul Tol palette as ``learning_curve.py``. Pass a
+single ``--metric`` to emit one figure with just that panel; pass ``--metrics a b
+c`` to emit an auto grid; pass neither to emit every metric that has data.
 
 Each friendly metric name resolves to whichever underlying column an agent
 actually wrote: DQN runs store ``ntk_rank`` / ``ntk_cond`` / ``churn_norm``,
@@ -40,13 +42,61 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent  # Go up from scripts/ to repo root
 sys.path.insert(0, str(ROOT / "src"))
 
-try:  # optional: prettier legend labels, but don't hard-depend on it
-    from plotting_utils import LABEL_MAP, get_mapped_label
+try:  # optional: prettier legend labels + shared colors, but don't hard-depend
+    from plotting_utils import COLOR_MAP, LABEL_MAP, get_mapped_label
 except Exception:  # pragma: no cover - fallback when src isn't importable
+    COLOR_MAP = {}
     LABEL_MAP = {}
 
     def get_mapped_label(label, label_map=None, disable_fov=False):
         return label
+
+
+# Paul Tol qualitative palette, mirroring learning_curve.py's coloring: vibrant
+# first, then any muted colors not already in vibrant, then (only when there are
+# more agents than that) a generated husl palette.
+try:
+    import tol_colors as tc
+
+    _VIBRANT = list(tc.colorsets["vibrant"])
+    _MUTED = list(tc.colorsets["muted"])
+    _COMBINED = _VIBRANT + [c for c in _MUTED if c not in _VIBRANT]
+except Exception:  # pragma: no cover
+    _VIBRANT = _COMBINED = []
+
+
+def build_agent_colors(agent_names: list) -> dict:
+    """One color per agent, consistent across panels, matching learning_curve.py.
+
+    Prefers the shared ``COLOR_MAP`` entry for an agent (so an agent keeps the
+    same color across every plot in the repo); otherwise draws from the Paul Tol
+    vibrant palette, widening to vibrant+muted and finally a husl palette when
+    there are more agents than the base palette holds.  ``COLOR_MAP`` agents do
+    not consume a fallback-cycle slot (same accounting as learning_curve.py).
+    """
+    n = len(agent_names)
+    if _VIBRANT and n <= len(_VIBRANT):
+        cycle = _VIBRANT
+    elif _COMBINED and n <= len(_COMBINED):
+        cycle = _COMBINED
+    elif _COMBINED:
+        try:
+            import seaborn as sns
+
+            cycle = sns.color_palette("husl", n)
+        except Exception:  # pragma: no cover
+            cycle = _COMBINED
+    else:  # tol_colors unavailable -> matplotlib default cycle
+        cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", []) or ["C0"]
+
+    colors, fallback_idx = {}, 0
+    for agent in agent_names:
+        if agent in COLOR_MAP:
+            colors[agent] = COLOR_MAP[agent]
+        else:
+            colors[agent] = cycle[fallback_idx % len(cycle)]
+            fallback_idx += 1
+    return colors
 
 
 # Friendly metric name -> panel spec.  A panel holds one or more `series`; each
@@ -182,6 +232,18 @@ def parse_args():
         help="Output filename stem (without extension). Defaults to a name "
         "derived from the metric(s) and agent(s).",
     )
+    p.add_argument(
+        "--ci",
+        type=float,
+        default=95.0,
+        help="Confidence level (%%) for the across-seed bootstrap band (default 95).",
+    )
+    p.add_argument(
+        "--n-boot",
+        type=int,
+        default=1000,
+        help="Bootstrap resamples for the CI band (default 1000, matching seaborn).",
+    )
     p.add_argument("--save-type", default="png", help="Image format (png, pdf, ...).")
     p.add_argument(
         "--no-legend", action="store_true", help="Suppress the per-agent legend."
@@ -216,14 +278,20 @@ def load_runs(data_path: Path) -> list:
     return runs
 
 
-def metric_series(runs: list, col: str):
-    """Seed-averaged (x_steps, values) for `col`, or None if absent/empty.
+def metric_matrix(runs: list, col: str):
+    """Per-seed aligned (x_steps, Y) for `col`, or None if absent/empty.
 
     A metric array has one entry per *measurement* (per env step for DQN, per
     update for PPO).  Its x-axis is recovered in env steps by comparing its
     length to the per-step `rewards` array: `steps_per_point = len(rewards) /
-    len(metric)` (1 for DQN, rollout_steps for PPO).  NaN entries are dropped
-    *after* averaging across seeds.
+    len(metric)` (1 for DQN, rollout_steps for PPO).
+
+    Unlike the old seed-averaging path, seeds are kept as separate rows so the
+    caller can bootstrap a confidence interval across them.  Runs are truncated
+    to the shortest common length (the metric schedule is identical across
+    seeds, so column ``j`` is the same measurement step for every seed) and
+    returned as ``Y`` of shape ``[n_seeds, n_points]`` -- still NaN on
+    non-measurement steps; the caller drops those columns after aggregating.
     """
     arrays = []
     steps_per_point = 1.0
@@ -241,25 +309,61 @@ def metric_series(runs: list, col: str):
         return None
 
     m = min(a.shape[0] for a in arrays)
-    stacked = np.stack([a[:m] for a in arrays], axis=0)
+    Y = np.stack([a[:m] for a in arrays], axis=0)  # [n_seeds, m]
+    x = np.arange(m) * steps_per_point
+    return x, Y
+
+
+def _bootstrap_ci(Y: np.ndarray, n_boot: int, ci: float, seed: int = 0):
+    """Across-seed mean and a percentile bootstrap CI band, per measurement step.
+
+    ``Y`` is ``[n_seeds, n_points]``.  Returns ``(mean, lo, hi)`` each
+    ``[n_points]``: ``mean`` is the across-seed ``nanmean``; ``lo``/``hi`` are
+    the ``ci``% percentile-bootstrap interval of that mean, resampling seeds
+    with replacement ``n_boot`` times -- the same nonparametric bootstrap
+    seaborn's ``errorbar=("ci", 95)`` uses in learning_curve.py.  With fewer than
+    two seeds the CI is undefined, so ``lo``/``hi`` are NaN and the band is
+    simply not drawn.  A fixed ``seed`` keeps the band reproducible run-to-run.
+    """
+    n_seeds = Y.shape[0]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)  # all-NaN slices
-        mean = np.nanmean(stacked, axis=0)
+        mean = np.nanmean(Y, axis=0)
+        if n_seeds < 2:
+            nan = np.full_like(mean, np.nan)
+            return mean, nan, nan
+        rng = np.random.default_rng(seed)
+        idx = rng.integers(0, n_seeds, size=(n_boot, n_seeds))
+        boot = np.nanmean(Y[idx], axis=1)  # [n_boot, n_points]
+        half = (100.0 - ci) / 2.0
+        lo = np.nanpercentile(boot, half, axis=0)
+        hi = np.nanpercentile(boot, 100.0 - half, axis=0)
+    return mean, lo, hi
 
-    x = np.arange(m) * steps_per_point
-    finite = np.isfinite(mean)
-    if not finite.any():
-        return None
-    return x[finite], mean[finite]
 
+def resolve_series(runs: list, cols: list, n_boot: int = 1000, ci: float = 95.0):
+    """First ``(col, (x, mean, lo, hi))`` in the priority list `cols` with finite
+    data for this agent, or None.
 
-def resolve_series(runs: list, cols: list):
-    """First (col, (x, y)) in the priority list `cols` that has finite data for
-    this agent, or None."""
+    Seeds are aggregated into an across-seed mean and a `ci`% bootstrap band,
+    with the non-measurement (all-NaN) steps dropped after aggregation.  The
+    bootstrap runs only on the finite columns, so the sparse metric schedule
+    keeps it cheap regardless of the per-step training length.
+    """
     for col in cols:
-        series = metric_series(runs, col)
-        if series is not None:
-            return col, series
+        mat = metric_matrix(runs, col)
+        if mat is None:
+            continue
+        x, Y = mat
+        # Restrict to real measurement steps before bootstrapping (the metric is
+        # NaN everywhere else), then aggregate.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            keep = np.isfinite(np.nanmean(Y, axis=0))
+        if not keep.any():
+            continue
+        mean, lo, hi = _bootstrap_ci(Y[:, keep], n_boot, ci)
+        return col, (x[keep], mean, lo, hi)
     return None
 
 
@@ -352,12 +456,9 @@ def main():
         if not metric_names:
             sys.exit("None of the known metrics have finite data for these agents.")
 
-    # One color per agent, consistent across panels.
-    color_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
-    agent_colors = {
-        agent: color_cycle[i % len(color_cycle)] if color_cycle else None
-        for i, (agent, _, _) in enumerate(agents)
-    }
+    # One color per agent, consistent across panels (shared COLOR_MAP + Paul Tol
+    # palette, matching learning_curve.py).
+    agent_colors = build_agent_colors([agent for agent, _, _ in agents])
 
     # Auto grid: roughly square, one panel per metric.
     n = len(metric_names)
@@ -375,22 +476,26 @@ def main():
         for agent, fov, runs in agents:
             base = get_mapped_label(agent, LABEL_MAP)
             for s_idx, series in enumerate(spec["series"]):
-                resolved = resolve_series(runs, series["cols"])
+                resolved = resolve_series(runs, series["cols"], args.n_boot, args.ci)
                 if resolved is None:
                     continue
-                _, (x, y) = resolved
+                _, (x, mean, lo, hi) = resolved
                 # Same color per agent, linestyle per series (actor/critic/total),
                 # with an explicit label so the legend maps line -> agent+series.
                 label = f"{base} ({series['name']})" if series["name"] else base
+                color = agent_colors[agent]
                 ax.plot(
                     x,
-                    y,
+                    mean,
                     marker=SERIES_MARKERS[s_idx % len(SERIES_MARKERS)],
                     markersize=3,
                     label=label,
-                    color=agent_colors[agent],
+                    color=color,
                     linestyle=SERIES_LINESTYLES[s_idx % len(SERIES_LINESTYLES)],
                 )
+                # Across-seed bootstrap CI band; skipped when <2 seeds (NaN lo/hi).
+                if np.isfinite(lo).any():
+                    ax.fill_between(x, lo, hi, color=color, alpha=0.2, linewidth=0)
                 n_plotted += 1
 
         ax.set_ylabel(spec["label"])
