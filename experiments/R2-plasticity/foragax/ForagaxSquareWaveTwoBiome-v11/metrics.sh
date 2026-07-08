@@ -22,8 +22,20 @@ export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_thread
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
 export JAX_PLATFORMS=cpu
 
-#$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLPReLU -f 9
-#$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLPReLU -f 9
-#$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLP_tanh -f 9
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLPReLU RealTimeActorCriticMLPReLU -f 9
 
-$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLPReLU_20m -f 9
+# One metric per agent
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLP-l2-init_relu -f 9
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLP_tanh -f 9
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLP_tanh_2 -f 9
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLPReLU -f 9
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLPReLU_20m -f 9
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLP-l2-init -f 9
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLP-l2-init_relu -f 9
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLP_crelu -f 9
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLPReLU -f 9
+
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLPReLU RealTimeActorCriticMLP-l2-init_relu RealTimeActorCriticMLP_crelu -f 9 --plot-name RTU-PPO_metric_comparisons
+# $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLPReLU ActorCriticMLP-l2-init_relu ActorCriticMLP_tanh ActorCriticMLP_tanh_2 -f 9 --plot-name PPO_metric_comparisons
+
+$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLPReLU RealTimeActorCriticMLPReLU -f 9 --plot-name PPO_vs_RTU-PPO

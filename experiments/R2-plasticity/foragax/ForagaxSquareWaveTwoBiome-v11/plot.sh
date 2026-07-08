@@ -11,33 +11,53 @@ EXP=experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11
 # comparison; the per-alg plasticity figures go in plots/<alg>/ below.
 python src/learning_curve.py "$EXP" \
     --metrics ewm_reward \
-    --plot-name "relu_RTUPPO_vs_PPO" \
+    --plot-name "relu_RTUPPO_vs_PPO_nobar" \
     --filter-alg-apertures RealTimeActorCriticMLPReLU:9 ActorCriticMLPReLU:9 \
     --end-frame 10000000 \
-    --legend-on-bar \
-    --plot-avg \
-    --horizontal-bars \
     --disable-fov \
-    --font-size 20
+    --font-size 20 \
+    --legend
 
-python src/learning_curve.py "$EXP" \
-    --metrics ewm_reward \
-    --plot-name "PPO_tanh_vs_relu" \
-    --filter-alg-apertures ActorCriticMLP_tanh:9 ActorCriticMLPReLU:9 \
-    --end-frame 10000000 \
-    --legend-on-bar \
-    --plot-avg \
-    --horizontal-bars \
-    --disable-fov \
-    --font-size 20
+# python src/learning_curve.py "$EXP" \
+#     --metrics ewm_reward \
+#     --plot-name "PPO_tanh_vs_relu" \
+#     --filter-alg-apertures ActorCriticMLP_tanh:9 ActorCriticMLPReLU:9 \
+#     --end-frame 10000000 \
+#     --legend-on-bar \
+#     --plot-avg \
+#     --horizontal-bars \
+#     --disable-fov \
+#     --font-size 20
 
-python src/learning_curve.py "$EXP" \
-    --metrics ewm_reward \
-    --plot-name "PPOReLU_20m" \
-    --filter-alg-apertures ActorCriticMLPReLU_20m:9 \
-    --end-frame 20000000 \
-    --legend-on-bar \
-    --plot-avg \
-    --horizontal-bars \
-    --disable-fov \
-    --font-size 20
+# python src/learning_curve.py "$EXP" \
+#     --metrics ewm_reward \
+#     --plot-name "PPOReLU_20m" \
+#     --filter-alg-apertures ActorCriticMLPReLU_20m:9 \
+#     --end-frame 20000000 \
+#     --legend-on-bar \
+#     --plot-avg \
+#     --horizontal-bars \
+#     --disable-fov \
+#     --font-size 20
+
+# python src/learning_curve.py "$EXP" \
+#     --metrics ewm_reward \
+#     --plot-name "RTU-PPO_comparisons" \
+#     --filter-alg-apertures RealTimeActorCriticMLP-l2-init:9 RealTimeActorCriticMLP-l2-init_relu:9 RealTimeActorCriticMLP_crelu:9 RealTimeActorCriticMLPReLU:9 \
+#     --end-frame 10000000 \
+#     --legend-on-bar \
+#     --plot-avg \
+#     --horizontal-bars \
+#     --disable-fov \
+#     --font-size 20
+
+# python src/learning_curve.py "$EXP" \
+#     --metrics ewm_reward \
+#     --plot-name "PPO_comparisons" \
+#     --filter-alg-apertures ActorCriticMLP_tanh:9 ActorCriticMLP-l2-init_relu:9 ActorCriticMLP_tanh_2:9 ActorCriticMLPReLU:9 \
+#     --end-frame 10000000 \
+#     --legend-on-bar \
+#     --plot-avg \
+#     --horizontal-bars \
+#     --disable-fov \
+#     --font-size 20

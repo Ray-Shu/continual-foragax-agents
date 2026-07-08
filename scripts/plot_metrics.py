@@ -63,7 +63,7 @@ except Exception:  # pragma: no cover - fallback when src isn't importable
 METRICS = {
     "ntk_rank": {
         "label": "NTK Rank",
-        "title": "NTK Rank Over Time",
+        "title": "NTK Rank",
         "log": False,
         "series": [
             {"name": "critic", "cols": ["value_ntk_rank", "ntk_rank"]},
@@ -72,25 +72,16 @@ METRICS = {
     },
     "ntk_eff_rank": {
         "label": "NTK Effective Rank",
-        "title": "NTK Effective Rank Over Time",
+        "title": "NTK Effective Rank",
         "log": False,
         "series": [
             {"name": "critic", "cols": ["value_ntk_eff_rank"]},
             {"name": "actor", "cols": ["policy_ntk_eff_rank"]},
         ],
     },
-    "ntk_cond": {
-        "label": "NTK Condition Number",
-        "title": "NTK Condition Number Over Time",
-        "log": True,
-        "series": [
-            {"name": "critic", "cols": ["value_ntk_cond", "ntk_cond"]},
-            {"name": "actor", "cols": ["policy_ntk_cond"]},
-        ],
-    },
     "critic_churn": {
         "label": "Relative Critic Churn",
-        "title": "Critic Churn Over Time (magnitude)",
+        "title": "Critic Churn (magnitude)",
         "log": False,
         "series": [
             {"name": "", "cols": ["value_churn", "churn_norm"]},
@@ -98,7 +89,7 @@ METRICS = {
     },
     "actor_churn": {
         "label": "Actor Churn",
-        "title": "Actor Churn Over Time (KL divergence)",
+        "title": "Actor Churn (KL divergence)",
         "log": False,
         "series": [
             {"name": "", "cols": ["policy_churn"]},
@@ -106,34 +97,39 @@ METRICS = {
     },
     "weight_drift": {
         "label": "Weight Drift",
-        "title": "Weight Drift Over Time",
+        "title": "Weight Drift",
         "log": False,
         "series": [
-            {"name": "total", "cols": ["weight_drift_total"]},
             {"name": "actor", "cols": ["weight_drift_pi"]},
             {"name": "critic", "cols": ["weight_drift_vf"]},
         ],
     },
     "weight_update_norm": {
         "label": "Weight Update Norm",
-        "title": "Weight Update Norm Over Time",
+        "title": "Weight Update Norm",
         "log": False,
         "series": [
-            {"name": "", "cols": ["weight_update_norm"]},
+            {"name": "actor", "cols": ["weight_update_norm_pi"]},
+            {"name": "critic", "cols": ["weight_update_norm_vf"]},
         ],
     },
     "weight_norm": {
         "label": "Weight Norm",
-        "title": "Weight Norm Over Time",
+        "title": "Weight Norm",
         "log": False,
         "series": [
-            {"name": "", "cols": ["weight_norm"]},
+            {"name": "actor", "cols": ["weight_norm_pi"]},
+            {"name": "critic", "cols": ["weight_norm_vf"]},
         ],
     },
 }
 
 # Linestyle per series index within a combined panel (actor vs critic vs total).
 SERIES_LINESTYLES = ["-", "--", ":", "-."]
+
+# Marker shape per series index — distinguishes actor/critic/total even when
+# points are packed too tightly for linestyle to read.
+SERIES_MARKERS = ["s", "o", "^", "D"]
 
 
 def _normalize_exp(exp: str) -> str:
@@ -389,7 +385,7 @@ def main():
                 ax.plot(
                     x,
                     y,
-                    marker="o",
+                    marker=SERIES_MARKERS[s_idx % len(SERIES_MARKERS)],
                     markersize=3,
                     label=label,
                     color=agent_colors[agent],

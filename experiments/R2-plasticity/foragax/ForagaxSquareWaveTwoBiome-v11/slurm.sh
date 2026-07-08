@@ -11,28 +11,61 @@ EXP=experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11
 for fov in 9; do
     # Vanilla PPO with ReLU everywhere (incl. the wide mid layer) -- the LOP baseline.
     python scripts/slurm.py \
-        --cluster clusters/vulcan-gpu-vmap-32G.json \
-        --tasks 5 --time 06:00:00 --runs 30 --force \
-        --entry src/rtu_ppo.py \
-        -e ${EXP}/${fov}/ActorCriticMLPReLU.json
+       --cluster clusters/vulcan-gpu-vmap-32G.json \
+       --tasks 5 --time 06:00:00 --runs 30 --force \
+       --entry src/rtu_ppo.py \
+       -e ${EXP}/${fov}/ActorCriticMLPReLU.json
 
     python scripts/slurm.py \
-        --cluster clusters/vulcan-gpu-vmap-32G.json \
-        --tasks 5 --time 06:00:00 --runs 30 --force \
-        --entry src/rtu_ppo.py \
-        -e ${EXP}/${fov}/ActorCriticMLPReLU_20m.json
+       --cluster clusters/vulcan-gpu-vmap-32G.json \
+       --tasks 5 --time 06:00:00 --runs 30 --force \
+       --entry src/rtu_ppo.py \
+       -e ${EXP}/${fov}/ActorCriticMLPReLU_20m.json
 
     # PPO with tanh from original paper
     python scripts/slurm.py \
-        --cluster clusters/vulcan-gpu-vmap-32G.json \
-        --tasks 5 --time 06:00:00 --runs 30 --force \
-        --entry src/rtu_ppo.py \
-        -e ${EXP}/${fov}/ActorCriticMLP_tanh.json
+       --cluster clusters/vulcan-gpu-vmap-32G.json \
+       --tasks 5 --time 06:00:00 --runs 30 --force \
+       --entry src/rtu_ppo.py \
+       -e ${EXP}/${fov}/ActorCriticMLP_tanh.json
 
     # RTU-PPO (ReLU) -- the agent that should resist LOP; the comparison arm.
+    python scripts/slurm.py \
+       --cluster clusters/vulcan-gpu-vmap-32G.json \
+       --tasks 5 --time 06:00:00 --runs 30 --force \
+       --entry src/rtu_ppo.py \
+       -e ${EXP}/${fov}/RealTimeActorCriticMLPReLU.json
+
+
     python scripts/slurm.py \
         --cluster clusters/vulcan-gpu-vmap-32G.json \
         --tasks 5 --time 06:00:00 --runs 30 --force \
         --entry src/rtu_ppo.py \
-        -e ${EXP}/${fov}/RealTimeActorCriticMLPReLU.json
+        -e ${EXP}/${fov}/ActorCriticMLP-l2-init_relu.json
+
+    python scripts/slurm.py \
+        --cluster clusters/vulcan-gpu-vmap-32G.json \
+        --tasks 5 --time 06:00:00 --runs 30 --force \
+        --entry src/rtu_ppo.py \
+        -e ${EXP}/${fov}/ActorCriticMLP_tanh_2.json
+
+    python scripts/slurm.py \
+        --cluster clusters/vulcan-gpu-vmap-32G.json \
+        --tasks 5 --time 06:00:00 --runs 30 --force \
+        --entry src/rtu_ppo.py \
+        -e ${EXP}/${fov}/RealTimeActorCriticMLP-l2-init.json
+
+    python scripts/slurm.py \
+        --cluster clusters/vulcan-gpu-vmap-32G.json \
+        --tasks 5 --time 06:00:00 --runs 30 --force \
+        --entry src/rtu_ppo.py \
+        -e ${EXP}/${fov}/RealTimeActorCriticMLP-l2-init_relu.json
+
+    python scripts/slurm.py \
+        --cluster clusters/vulcan-gpu-vmap-32G.json \
+        --tasks 2 --time 06:00:00 --runs 30 --force \
+        --entry src/rtu_ppo.py \
+        -e ${EXP}/${fov}/RealTimeActorCriticMLP_crelu.json
+
+
 done

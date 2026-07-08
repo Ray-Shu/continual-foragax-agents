@@ -115,6 +115,7 @@ class TrainConfig:
     use_hint_trace: bool = struct.field(pytree_node=False)
     use_layernorm: bool = struct.field(pytree_node=False)
     use_middle_layer: bool = struct.field(pytree_node=False)
+    use_midlayer_layernorm: bool = struct.field(pytree_node=False)
     conv: str = struct.field(pytree_node=False)
     allocate_frames: bool = struct.field(pytree_node=False)
     video_length: int = struct.field(pytree_node=False)
@@ -1069,6 +1070,7 @@ def experiment(rng, config: TrainConfig):
         kwargs["conv"] = config.conv
     if _agent_class is ActorCriticMLP:
         kwargs["use_middle_layer"] = config.use_middle_layer
+        kwargs["use_midlayer_layernorm"] = config.use_midlayer_layernorm
 
     # Create and initialize the network. `agent` is dynamically dispatched via
     # getAgent(config.agent_type); pyright sees only the base type so it can't
@@ -1700,6 +1702,7 @@ def experiment(rng, config: TrainConfig):
                     action_dim,
                     reward_dim,
                     config.chunked_ref,
+                    labels,
                     compute_value=True,
                     compute_policy=True,
                 )
@@ -1713,17 +1716,18 @@ def experiment(rng, config: TrainConfig):
         else:
             ntk_metrics = nan_ppo_metrics()
 
-        # Weight norm: global L2 norm of the post-update params, gated on its own
-        # weight_norm_freq (independent of the NTK cadence above).  Cheap -- no
-        # reference batch or Jacobian -- so this is just an L2 reduction over the
-        # param tree.  NaN on non-metric updates / when disabled.  Per-update scalar.
+        # Weight norm: L2 norm of the post-update params, split pi / vf / total
+        # (like weight drift below), gated on its own weight_norm_freq
+        # (independent of the NTK cadence above).  Cheap -- no reference batch
+        # or Jacobian -- so this is just an L2 reduction over the param tree.
+        # NaN triple on non-metric updates / when disabled.  Per-update scalars.
         if config.compute_weight_norm:
             is_wn_step = _crossed_interval(
                 start_timestep, log_env_state.timestep, config.weight_norm_freq
             )
             weight_norm_metric = jax.lax.cond(
                 is_wn_step,
-                lambda _: weight_norm(ntk_params_after),
+                lambda _: weight_norm(ntk_params_after, labels),
                 lambda _: nan_weight_norm(),
                 operand=None,
             )
@@ -1852,15 +1856,16 @@ def experiment(rng, config: TrainConfig):
     (
         value_ntk_rank,
         value_ntk_eff_rank,
-        value_ntk_cond,
         value_churn,
         policy_ntk_rank,
         policy_ntk_eff_rank,
-        policy_ntk_cond,
         policy_churn,
-        weight_update_norm,
+        weight_update_norm_pi,
+        weight_update_norm_vf,
+        weight_update_norm_total,
     ) = ntk_metrics
     weight_drift_pi, weight_drift_vf, weight_drift_total = weight_drift_metric
+    weight_norm_pi, weight_norm_vf, weight_norm_total = weight_norm_metric
     env_step_state = last_carry.carry[0]
     frames = env_step_state[2].frames
     return (
@@ -1875,15 +1880,15 @@ def experiment(rng, config: TrainConfig):
         (
             value_ntk_rank,
             value_ntk_eff_rank,
-            value_ntk_cond,
             value_churn,
             policy_ntk_rank,
             policy_ntk_eff_rank,
-            policy_ntk_cond,
             policy_churn,
-            weight_update_norm,
+            weight_update_norm_pi,
+            weight_update_norm_vf,
+            weight_update_norm_total,
         ),
-        weight_norm_metric,
+        (weight_norm_pi, weight_norm_vf, weight_norm_total),
         (weight_drift_pi, weight_drift_vf, weight_drift_total),
         frames,
         grad_norms,
@@ -2086,6 +2091,11 @@ def main():
             use_middle_layer=bool(
                 hypers.get("representation", {}).get("use_middle_layer", True)
             ),
+            use_midlayer_layernorm=bool(
+                hypers.get("representation", {}).get(
+                    "use_midlayer_layernorm", False
+                )
+            ),
             conv=str(hypers.get("representation", {}).get("conv", "Conv2D")),
             reward_trace_decay=float(
                 hypers.get(
@@ -2159,15 +2169,15 @@ def main():
         (
             value_ntk_rank,
             value_ntk_eff_rank,
-            value_ntk_cond,
             value_churn,
             policy_ntk_rank,
             policy_ntk_eff_rank,
-            policy_ntk_cond,
             policy_churn,
-            weight_update_norm,
+            weight_update_norm_pi,
+            weight_update_norm_vf,
+            weight_update_norm_total,
         ),
-        weight_norm_metric,
+        (weight_norm_pi, weight_norm_vf, weight_norm_total),
         (weight_drift_pi, weight_drift_vf, weight_drift_total),
         frames,
         grad_norms,
@@ -2202,14 +2212,16 @@ def main():
         run_metrics = {k: v[i] for k, v in metrics.items()}
         run_value_ntk_rank = value_ntk_rank[i]
         run_value_ntk_eff_rank = value_ntk_eff_rank[i]
-        run_value_ntk_cond = value_ntk_cond[i]
         run_value_churn = value_churn[i]
         run_policy_ntk_rank = policy_ntk_rank[i]
         run_policy_ntk_eff_rank = policy_ntk_eff_rank[i]
-        run_policy_ntk_cond = policy_ntk_cond[i]
         run_policy_churn = policy_churn[i]
-        run_weight_update_norm = weight_update_norm[i]
-        run_weight_norm = weight_norm_metric[i]
+        run_weight_update_norm_pi = weight_update_norm_pi[i]
+        run_weight_update_norm_vf = weight_update_norm_vf[i]
+        run_weight_update_norm_total = weight_update_norm_total[i]
+        run_weight_norm_pi = weight_norm_pi[i]
+        run_weight_norm_vf = weight_norm_vf[i]
+        run_weight_norm_total = weight_norm_total[i]
         run_weight_drift_pi = weight_drift_pi[i]
         run_weight_drift_vf = weight_drift_vf[i]
         run_weight_drift_total = weight_drift_total[i]
@@ -2274,14 +2286,16 @@ def main():
             **run_metrics,
             value_ntk_rank=run_value_ntk_rank,
             value_ntk_eff_rank=run_value_ntk_eff_rank,
-            value_ntk_cond=run_value_ntk_cond,
             value_churn=run_value_churn,
             policy_ntk_rank=run_policy_ntk_rank,
             policy_ntk_eff_rank=run_policy_ntk_eff_rank,
-            policy_ntk_cond=run_policy_ntk_cond,
             policy_churn=run_policy_churn,
-            weight_update_norm=run_weight_update_norm,
-            weight_norm=run_weight_norm,
+            weight_update_norm_pi=run_weight_update_norm_pi,
+            weight_update_norm_vf=run_weight_update_norm_vf,
+            weight_update_norm_total=run_weight_update_norm_total,
+            weight_norm_pi=run_weight_norm_pi,
+            weight_norm_vf=run_weight_norm_vf,
+            weight_norm_total=run_weight_norm_total,
             weight_drift_pi=run_weight_drift_pi,
             weight_drift_vf=run_weight_drift_vf,
             weight_drift_total=run_weight_drift_total,
