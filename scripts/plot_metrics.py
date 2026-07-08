@@ -1,36 +1,44 @@
-"""Plot plasticity metrics (NTK rank/cond/eff-rank, churn, weight norms) over
-training, comparing one or more agents on the same axes.
+"""Plot plasticity metrics (NTK rank/eff-rank, churn, weight norms) over
+training, comparing one or more agents.
 
-Like ``src/learning_curve.py``, the hue is the *agent*: pass several agents and
-each metric panel overlays one line per agent (across-seed mean) with a shaded
-95%% bootstrap CI band, so different agents' metrics can be compared directly and
-the band shows whether a trend is real or seed noise. Agent colors come from the
-same shared ``COLOR_MAP`` / Paul Tol palette as ``learning_curve.py``. Pass a
-single ``--metric`` to emit one figure with just that panel; pass ``--metrics a b
-c`` to emit an auto grid; pass neither to emit every metric that has data.
+Like ``src/learning_curve.py``, color encodes the *agent*: each line is one
+agent's across-seed mean with a shaded 95%% bootstrap CI band, so agents can be
+compared directly and the band shows whether a trend is real or seed noise.
+Agent colors come from the same shared ``COLOR_MAP`` / Paul Tol palette as
+``learning_curve.py``.
+
+The figure facets by (network role, metric): rows are the network trunks --
+**actor** on top, **critic** below -- and columns are the metrics.  So a metric
+that measures both trunks (e.g. weight drift) becomes an actor subplot above a
+critic subplot rather than four cramped lines on one axis; the actor/critic
+distinction is carried by the row (labelled once on the left), leaving color free
+to mean only the agent.  All panels share the env-step x-axis; a metric's actor
+and critic rows share a y-axis when their ranges are comparable (see ``share_y``
+in ``METRICS``).  Pass a single ``--metric`` for one metric's actor+critic
+column; ``--metrics a b c`` for several columns; neither to plot every metric
+that has data.
 
 Each friendly metric name resolves to whichever underlying column an agent
-actually wrote: DQN runs store ``ntk_rank`` / ``ntk_cond`` / ``churn_norm``,
-while PPO runs store separate ``value_*`` / ``policy_*`` columns. So e.g.
-``--metric ntk_rank`` plots ``value_ntk_rank`` for a PPO agent and ``ntk_rank``
-for a DQN agent on the same axis.
+actually wrote: DQN runs store ``ntk_rank`` / ``churn_norm`` (a single head),
+while PPO runs store separate ``value_*`` / ``policy_*`` columns.  So e.g.
+``--metric ntk_rank`` plots ``policy_ntk_rank`` in the actor row and
+``value_ntk_rank`` (or DQN's single ``ntk_rank``) in the critic row.
 
 Examples:
-    # one panel per metric, one line per agent
+    # every metric, actor row over critic row, one line per agent
     python scripts/plot_metrics.py \
         -e experiments/X33-ForagaxSquareWaveTwoBiome-v11/foragax/ForagaxSquareWaveTwoBiome-v11 \
         -a PPO_LN_128 PPO_LN_256 -f 9
 
-    # a single metric -> a single graph
+    # a single metric -> its actor and critic subplots
     python scripts/plot_metrics.py -e <exp> -a DQN PPO_LN_128 -f 9 \
-        --metric critic_churn --plot-name dqn_vs_ppo_critic_churn
+        --metric churn --plot-name dqn_vs_ppo_churn
 
     # list the metric names you can pass to --metric / --metrics
     python scripts/plot_metrics.py --list-metrics
 """
 
 import argparse
-import math
 import sys
 import warnings
 from pathlib import Path
@@ -99,87 +107,97 @@ def build_agent_colors(agent_names: list) -> dict:
     return colors
 
 
-# Friendly metric name -> panel spec.  A panel holds one or more `series`; each
-# series has a `name` (a sub-label, e.g. actor/critic/total — "" for a lone
-# series) and a `cols` *priority list* of underlying parquet/npz column names.
-# For each agent the first column that has finite data is used, so one friendly
-# name works across agent types (DQN's single head vs the actor/critic heads).
+# Friendly metric name -> panel spec.  A metric holds one or more `series`; each
+# series has a `role` (the network trunk it measures: "actor" / "critic") and a
+# `cols` *priority list* of underlying parquet/npz column names.  For each agent
+# the first column that has finite data is used, so one friendly name works
+# across agent types (DQN's single head vs the actor/critic heads).
 #
-# Panels with multiple series (ntk_rank / ntk_eff_rank / ntk_cond / weight_drift)
-# overlay actor and critic on one axis: color encodes the *agent* (so an agent's
-# actor/critic lines share a color) and linestyle encodes the *series*, with a
-# legend spelling out "agent (series)".  `log` uses a log y-axis (condition
-# numbers span many orders of magnitude).
+# The plot facets by (metric, role): rows are the network roles (actor on top,
+# critic below), columns are the metrics.  Color encodes *only the agent*, and
+# the actor/critic distinction is carried by which row a subplot is in -- so a
+# metric that used to cram four lines onto one axis is now two uncluttered
+# subplots of one line per agent.  A per-series `label` overrides the metric
+# `label` for that row's y-axis (used by churn, whose actor and critic are
+# different quantities).  `share_y` links the y-limits of a metric's actor and
+# critic rows; set it False when their ranges differ enough that a shared axis
+# would crush one (e.g. NTK effective rank: actor ~8-10 vs critic ~2-4).  `log`
+# uses a log y-axis.
 METRICS = {
     "ntk_rank": {
         "label": "NTK Rank",
         "title": "NTK Rank",
         "log": False,
+        "share_y": True,
         "series": [
-            {"name": "critic", "cols": ["value_ntk_rank", "ntk_rank"]},
-            {"name": "actor", "cols": ["policy_ntk_rank"]},
+            {"role": "actor", "cols": ["policy_ntk_rank"]},
+            {"role": "critic", "cols": ["value_ntk_rank", "ntk_rank"]},
         ],
     },
     "ntk_eff_rank": {
         "label": "NTK Effective Rank",
         "title": "NTK Effective Rank",
         "log": False,
+        "share_y": False,  # actor ~8-10, critic ~2-4: shared axis crushes critic
         "series": [
-            {"name": "critic", "cols": ["value_ntk_eff_rank"]},
-            {"name": "actor", "cols": ["policy_ntk_eff_rank"]},
+            {"role": "actor", "cols": ["policy_ntk_eff_rank"]},
+            {"role": "critic", "cols": ["value_ntk_eff_rank"]},
         ],
     },
-    "critic_churn": {
-        "label": "Relative Critic Churn",
-        "title": "Critic Churn (magnitude)",
+    # Churn: actor is a KL divergence, critic a relative (scale-invariant) MSE --
+    # different quantities, so independent y-axes and per-row labels.
+    "churn": {
+        "label": "Churn",
+        "title": "Churn",
         "log": False,
+        "share_y": False,
         "series": [
-            {"name": "", "cols": ["value_churn", "churn_norm"]},
-        ],
-    },
-    "actor_churn": {
-        "label": "Actor Churn",
-        "title": "Actor Churn (KL divergence)",
-        "log": False,
-        "series": [
-            {"name": "", "cols": ["policy_churn"]},
+            {
+                "role": "actor",
+                "label": "Actor Churn (KL divergence)",
+                "cols": ["policy_churn"],
+            },
+            {
+                "role": "critic",
+                "label": "Relative Critic Churn",
+                "cols": ["value_churn", "churn_norm"],
+            },
         ],
     },
     "weight_drift": {
         "label": "Weight Drift",
         "title": "Weight Drift",
         "log": False,
+        "share_y": True,
         "series": [
-            {"name": "actor", "cols": ["weight_drift_pi"]},
-            {"name": "critic", "cols": ["weight_drift_vf"]},
+            {"role": "actor", "cols": ["weight_drift_pi"]},
+            {"role": "critic", "cols": ["weight_drift_vf"]},
         ],
     },
     "weight_update_norm": {
         "label": "Weight Update Norm",
         "title": "Weight Update Norm",
         "log": False,
+        "share_y": True,
         "series": [
-            {"name": "actor", "cols": ["weight_update_norm_pi"]},
-            {"name": "critic", "cols": ["weight_update_norm_vf"]},
+            {"role": "actor", "cols": ["weight_update_norm_pi"]},
+            {"role": "critic", "cols": ["weight_update_norm_vf"]},
         ],
     },
     "weight_norm": {
         "label": "Weight Norm",
         "title": "Weight Norm",
         "log": False,
+        "share_y": True,
         "series": [
-            {"name": "actor", "cols": ["weight_norm_pi"]},
-            {"name": "critic", "cols": ["weight_norm_vf"]},
+            {"role": "actor", "cols": ["weight_norm_pi"]},
+            {"role": "critic", "cols": ["weight_norm_vf"]},
         ],
     },
 }
 
-# Linestyle per series index within a combined panel (actor vs critic vs total).
-SERIES_LINESTYLES = ["-", "--", ":", "-."]
-
-# Marker shape per series index — distinguishes actor/critic/total even when
-# points are packed too tightly for linestyle to read.
-SERIES_MARKERS = ["s", "o", "^", "D"]
+# Canonical top-to-bottom row order for the network roles.
+ROLE_ORDER = ["actor", "critic", "total"]
 
 
 def _normalize_exp(exp: str) -> str:
@@ -386,12 +404,7 @@ def main():
     if args.list_metrics:
         print("Available metrics (pass to --metric / --metrics):\n")
         for name, spec in METRICS.items():
-            parts = [
-                f"{s['name']}: {'/'.join(s['cols'])}"
-                if s["name"]
-                else "/".join(s["cols"])
-                for s in spec["series"]
-            ]
+            parts = [f"{s['role']}: {'/'.join(s['cols'])}" for s in spec["series"]]
             print(f"  {name:<20} {spec['label']}  <- {'; '.join(parts)}")
         return
 
@@ -460,62 +473,102 @@ def main():
     # palette, matching learning_curve.py).
     agent_colors = build_agent_colors([agent for agent, _, _ in agents])
 
-    # Auto grid: roughly square, one panel per metric.
-    n = len(metric_names)
-    n_cols = math.ceil(math.sqrt(n))
-    n_rows = math.ceil(n / n_cols)
+    # Facet by (role, metric): rows are network roles (actor on top, critic
+    # below), columns are metrics.  A role row exists only if some selected
+    # metric measures it; a (role, metric) cell with no matching series is blank.
+    roles = [
+        r
+        for r in ROLE_ORDER
+        if any(
+            s["role"] == r for name in metric_names for s in METRICS[name]["series"]
+        )
+    ]
+    n_rows, n_cols = len(roles), len(metric_names)
     fig, axes = plt.subplots(
-        n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), squeeze=False
+        n_rows,
+        n_cols,
+        figsize=(5 * n_cols, 3.5 * n_rows),
+        squeeze=False,
+        sharex=True,  # every panel is the same env-step axis
     )
-    flat_axes = axes.flatten()
 
-    for idx, name in enumerate(metric_names):
+    for c_idx, name in enumerate(metric_names):
         spec = METRICS[name]
-        ax = flat_axes[idx]
-        n_plotted = 0
-        for agent, fov, runs in agents:
-            base = get_mapped_label(agent, LABEL_MAP)
-            for s_idx, series in enumerate(spec["series"]):
+        col_axes = []  # populated axes in this column, for optional y-sharing
+        for r_idx, role in enumerate(roles):
+            ax = axes[r_idx][c_idx]
+            series = next((s for s in spec["series"] if s["role"] == role), None)
+            if series is None:
+                ax.axis("off")  # this metric has no such role (blank cell)
+                continue
+
+            n_plotted = 0
+            for agent, fov, runs in agents:
                 resolved = resolve_series(runs, series["cols"], args.n_boot, args.ci)
                 if resolved is None:
                     continue
                 _, (x, mean, lo, hi) = resolved
-                # Same color per agent, linestyle per series (actor/critic/total),
-                # with an explicit label so the legend maps line -> agent+series.
-                label = f"{base} ({series['name']})" if series["name"] else base
                 color = agent_colors[agent]
-                ax.plot(
-                    x,
-                    mean,
-                    marker=SERIES_MARKERS[s_idx % len(SERIES_MARKERS)],
-                    markersize=3,
-                    label=label,
-                    color=color,
-                    linestyle=SERIES_LINESTYLES[s_idx % len(SERIES_LINESTYLES)],
-                )
+                # Color == agent; the actor/critic distinction is the row, so no
+                # per-series linestyle/marker is needed.
+                ax.plot(x, mean, color=color, label=get_mapped_label(agent, LABEL_MAP))
                 # Across-seed bootstrap CI band; skipped when <2 seeds (NaN lo/hi).
                 if np.isfinite(lo).any():
                     ax.fill_between(x, lo, hi, color=color, alpha=0.2, linewidth=0)
                 n_plotted += 1
 
-        ax.set_ylabel(spec["label"])
-        ax.set_title(spec["title"])
-        if spec["log"] and n_plotted > 0:
-            ax.set_yscale("log")
-        ax.spines[["top", "right"]].set_visible(False)
-        if n_plotted == 0:
-            ax.text(
-                0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes
-            )
-        else:
-            _format_xaxis(ax)
-        # Legend on each panel so a single-metric figure is self-contained.
-        if n_plotted > 1 and not args.no_legend:
-            ax.legend(frameon=False)
+            # y-label carries the metric units (per-row override for churn); the
+            # role is labelled once per row (left column) further below.
+            ax.set_ylabel(series.get("label", spec["label"]))
+            if r_idx == 0:
+                ax.set_title(spec["title"])
+            if spec["log"] and n_plotted > 0:
+                ax.set_yscale("log")
+            ax.spines[["top", "right"]].set_visible(False)
+            if n_plotted == 0:
+                ax.text(
+                    0.5, 0.5, "no data", ha="center", va="center",
+                    transform=ax.transAxes,
+                )
+            else:
+                col_axes.append(ax)
+            # x-axis label only on the bottom-most row.
+            if r_idx == n_rows - 1:
+                _format_xaxis(ax)
 
-    # Hide unused grid cells.
-    for j in range(n, len(flat_axes)):
-        flat_axes[j].axis("off")
+        # Optionally tie the actor/critic rows of this metric to one y-range so
+        # their magnitudes stay directly comparable (skipped when their ranges
+        # differ too much -- e.g. NTK effective rank -- via the registry flag).
+        if spec.get("share_y") and len(col_axes) > 1:
+            lo_y = min(a.get_ylim()[0] for a in col_axes)
+            hi_y = max(a.get_ylim()[1] for a in col_axes)
+            for a in col_axes:
+                a.set_ylim(lo_y, hi_y)
+
+    # Label each row (network role) once, to the left of the leftmost column.
+    for r_idx, role in enumerate(roles):
+        axes[r_idx][0].annotate(
+            role.capitalize(),
+            xy=(0, 0.5),
+            xytext=(-axes[r_idx][0].yaxis.labelpad - 18, 0),
+            xycoords=axes[r_idx][0].yaxis.label,
+            textcoords="offset points",
+            ha="right",
+            va="center",
+            rotation=90,
+            fontweight="bold",
+        )
+
+    # Single agent legend (color == agent), since roles are now rows not colors.
+    if not args.no_legend and len(agents) > 1:
+        from matplotlib.lines import Line2D
+
+        handles = [
+            Line2D([0], [0], color=agent_colors[a], lw=2,
+                   label=get_mapped_label(a, LABEL_MAP))
+            for a, _, _ in agents
+        ]
+        fig.legend(handles=handles, frameon=False, loc="upper right")
 
     fig.tight_layout()
 
