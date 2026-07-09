@@ -62,6 +62,7 @@ LABEL_MAP: Dict[str, str] = {
     "PPO_LN_HINT_128": "PPO (CA)",
     "PPO_L2": "PPO (L2)",
     "ActorCriticMLP": "PPO",
+    "ActorCriticMLPReLU": "PPO (ReLU)",
     "ActorCriticMLP-l2": "PPO (L2)",
     "ActorCriticMLP-l2-init": "PPO (L2 Init)",
     "ActorCriticMLP-world": "PPO (World)",
@@ -69,6 +70,7 @@ LABEL_MAP: Dict[str, str] = {
     "ActorCriticMLP-reset": "PPO (Head Reset)",
     "ActorCriticMLP-shrink-and-perturb": "PPO (S&P)",
     "RealTimeActorCriticMLP": "RTU-PPO",
+    "RealTimeActorCriticMLPReLU": "RTU-PPO (ReLU)",
     "RealTimeActorCriticMLP-l2": "RTU-PPO (L2)",
     "PPO-RTU": "RTU-PPO",
     "PPO-RTU_128": "RTU-PPO",
@@ -93,7 +95,6 @@ LABEL_MAP: Dict[str, str] = {
     "DRQN_1_1": "DRQN (1-1)",
     "DRQN_LN_0_2": "DRQN (LN, 0-2)",
     "DRQN_0_2": "DRQN (0-2)",
-    "DRQN": "DRQN",
     "PT_DQN": "PT DQN",
     "Search-Brown": "Search (Brown)",
     "Search-Brown-Avoid-Green": "Search (+B-G)",
@@ -126,8 +127,10 @@ YLABEL_MAP: Dict[str, str] = {
 
 
 # Color scheme for plotting
-colorset = tc.tol_cset("high_contrast")
-sunset_colormap = tc.tol_cmap("sunset")
+# `Any`: tol_colors' tol_cset/tol_cmap return types don't expose the named color
+# attributes / call signature to the type checker.
+colorset: Any = tc.tol_cset("high_contrast")
+sunset_colormap: Any = tc.tol_cmap("sunset")
 
 # Biome colors for plotting
 TWO_BIOME_COLORS: Dict[str, Any] = {
@@ -178,9 +181,7 @@ COLOR_MAP: Dict[str, Any] = {
     "PPO (CA)": _muted.purple,
     "PPO": _muted.indigo,
     "PPO (Frozen @ 5 M)": _muted.indigo,
-    "DQN": _muted.green,
     "DQN (Frozen @ 5 M)": _muted.green,
-    "DRQN": "black",
     "DRQN (Frozen @ 5 M)": "black",
     "DQN (RT)": _vibrant.teal,
     "DQN (RT) (Frozen @ 5 M)": _vibrant.teal,

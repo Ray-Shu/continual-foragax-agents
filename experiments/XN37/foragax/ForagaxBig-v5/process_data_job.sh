@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=aip-amw8
+#SBATCH --account=aip-whitem
 #SBATCH --job-name=XN37_process_data
 #SBATCH --mem-per-cpu=16G
 #SBATCH --ntasks=16

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=aip-amw8
+#SBATCH --account=aip-whitem
 #SBATCH --job-name=XN35_foragax-sweep_ForagaxBig-v5_process_hypers
 #SBATCH --mem-per-cpu=128G
 #SBATCH --ntasks=1

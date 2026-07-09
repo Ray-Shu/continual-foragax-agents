@@ -28,6 +28,9 @@ def getAgent(name):
     if name.startswith("ActorCriticConv"):
         return ActorCriticConv
 
+    # tanh and ReLU share one class; the activation comes from the explicit
+    # `representation.activation` config field (read in rtu_ppo.py). Variants are
+    # kept as separate config files so results/plots stay separable.
     if name.startswith("RealTimeActorCriticMLP"):
         return RealTimeActorCriticMLP
 

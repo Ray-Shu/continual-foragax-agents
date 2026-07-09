@@ -32,3 +32,6 @@ build/
 **.egg-info/
 
 venv.tar.xz
+
+# macOS Finder metadata
+.DS_Store

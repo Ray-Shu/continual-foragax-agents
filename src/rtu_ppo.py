@@ -3,12 +3,11 @@
 # Ensure third-party libraries that expect older JAX internals can import.
 # This sets a small compatibility alias if needed before importing distrax/tfp.
 import argparse
-import utils.jax_compat  # noqa: F401
-import socket
-import time
 import logging
 import os
+import socket
 import sys
+import time
 from collections.abc import Mapping
 from functools import partial
 from typing import Any, Callable, NamedTuple, Tuple
@@ -29,6 +28,7 @@ from ml_instrumentation.Sampler import Ignore, MovingAverage, Subsample
 from ml_instrumentation.utils import Pipe
 from PyExpUtils.results.tools import getParamsAsDict
 
+import utils.jax_compat  # noqa: F401
 from algorithms.nn.ACConv import ActorCriticConv
 from algorithms.nn.ACMLP import ActorCriticMLP
 from algorithms.nn.RealTimeACConv import RealTimeActorCriticConv
@@ -42,7 +42,14 @@ from experiment import ExperimentModel
 from utils.checkpoint import Checkpoint
 from utils.ml_instrumentation.Sampler import Mean
 from utils.ml_instrumentation.utils import Last
-from utils.ppo_metrics import compute_ppo_metrics, nan_ppo_metrics
+from utils.ppo_metrics import (
+    compute_ppo_metrics,
+    nan_ppo_metrics,
+    nan_weight_drift,
+    nan_weight_norm,
+    weight_drift,
+    weight_norm,
+)
 from utils.preempt import TimeoutHandler
 
 sys.path.insert(0, os.path.abspath("/tmp/src"))
@@ -107,6 +114,8 @@ class TrainConfig:
     use_reward_trace: bool = struct.field(pytree_node=False)
     use_hint_trace: bool = struct.field(pytree_node=False)
     use_layernorm: bool = struct.field(pytree_node=False)
+    use_middle_layer: bool = struct.field(pytree_node=False)
+    use_midlayer_layernorm: bool = struct.field(pytree_node=False)
     conv: str = struct.field(pytree_node=False)
     allocate_frames: bool = struct.field(pytree_node=False)
     video_length: int = struct.field(pytree_node=False)
@@ -118,6 +127,19 @@ class TrainConfig:
     compute_ntk: bool = struct.field(pytree_node=False)
     ntk_freq: int = struct.field(pytree_node=False)
     n_ref: int = struct.field(pytree_node=False)
+    # Row-chunk size for the memory-bounded NTK Gram build; result-invariant,
+    # trades peak memory against recompute.  Defaults to n_ref // 4.
+    chunked_ref: int = struct.field(pytree_node=False)
+    # Weight-norm metric -- independent cadence / flag from the NTK metrics above
+    compute_weight_norm: bool = struct.field(pytree_node=False)
+    weight_norm_freq: int = struct.field(pytree_node=False)
+    # Weight-drift metric (||theta - theta_0||, split pi/vf/total) -- independent
+    # cadence / flag; the diagnostic counterpart to L2-to-init ("w0") reg.
+    compute_weight_drift: bool = struct.field(pytree_node=False)
+    weight_drift_freq: int = struct.field(pytree_node=False)
+    # Plasticity probes (effective rank / dormancy / saturation). Explicit on/off
+    # flag; probing additionally requires a probe-instrumented class (_is_probed).
+    compute_plasticity: bool = struct.field(pytree_node=False)
     # ---- DYNAMIC (may vary per idx; arithmetic only) ----
     max_grad_norm: float
     l2_reg_pi: float
@@ -136,6 +158,9 @@ class TrainConfig:
 
     id: int
     reward_trace_decay: float
+    persist_decay: float
+    sat_persist_threshold: float
+    dormant_threshold: float
     gamma: float
     gae_lambda: float
     clip_eps: float
@@ -150,6 +175,7 @@ class TrainConfig:
     sp_interval: int = -1
     shrink_factor: float = 1.0
     noise_scale: float = 0.0
+
 
 class GymnaxEnvState(struct.PyTreeNode):
     to_render: bool = struct.field(pytree_node=True)
@@ -174,13 +200,340 @@ class Transition(NamedTuple):
     value: jnp.ndarray  # v(o_t)
     reward: jnp.ndarray  # r[t+1]
     log_prob: jnp.ndarray
-    obs: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]  # o_t, a_{t-1}, r_{t-1}
+    obs: Tuple[jnp.ndarray, ...]  # variable-length: (o_t, a_{t-1}, r_{t-1}, ...)
     info: jnp.ndarray
 
 
 class Interaction(NamedTuple):
     a: int
     r: bool
+
+
+# ----------------------------------------------------------------------------
+# -- Plasticity metric helpers --
+#
+# Activation-aware probes captured during a rollout via Flax `sow` calls in
+# RealTimeACMLP. Probe sites and metrics:
+#   actor/critic_pre1, actor/critic_pre2  (pre-tanh)  → effective rank +
+#       saturation rate  E_units[ 1{ |E_states[tanh(z)]| > 0.95 } ]: fraction of
+#       units pinned to one rail across the probe set (constant / non-
+#       differentiating), the tanh analogue of Sokar dormancy. sat_persist is
+#       the same quantity with the per-unit mean EMA'd across rollouts.
+#   actor/critic_rtu_out  (post-ReLU)  → effective rank + Sokar τ-dormant
+#       fraction with τ = 0.025 (the regime Sokar 2023 was designed for).
+# Expectations are estimated as sample means over the rollout's collapsed
+# (T·B, H) activation matrix — Monte Carlo for E_{x∼D_rollout}.
+# ----------------------------------------------------------------------------
+# Network classes that carry the plasticity sow() probes. Probe-eligibility is
+# decided by the resolved class (via the registry), NOT by exact agent name, so
+# every suffixed variant (ActorCriticMLP-l2, ActorCriticMLP_relu_2, ...) and any
+# activation (tanh/relu/crelu) is covered uniformly.
+_PROBED_CLASSES = (ActorCriticMLP, RealTimeActorCriticMLP)
+
+
+def _is_probed(agent_type):
+    """True iff agent_type resolves to a probe-instrumented MLP/RTU-MLP class."""
+    try:
+        return getAgent(agent_type) in _PROBED_CLASSES
+    except Exception:
+        return False
+
+
+def _should_probe(config):
+    """Probing runs iff explicitly enabled AND the class carries probes."""
+    return config.compute_plasticity and _is_probed(config.agent_type)
+
+
+def _agent_is_rtu(agent_type):
+    """Recurrent (RTU) MLP agent vs the feedforward vanilla MLP."""
+    return agent_type.startswith("RealTime")
+
+
+def _wide_site_name(config):
+    """Sown intermediate for the wide middle layer, or None when it is absent.
+    RTU nets always have it (rtu_out); a vanilla MLP has the wide Dense ('mid')
+    only when use_middle_layer is set. Emitted into the unified '*_rtu' column."""
+    if _agent_is_rtu(config.agent_type):
+        return "rtu_out"
+    return "mid" if config.use_middle_layer else None
+
+
+def _effective_rank(activation):
+    h = activation.reshape(-1, activation.shape[-1]).astype(jnp.float32)
+    h = h - jnp.mean(h, axis=0, keepdims=True)
+    s = jnp.linalg.svd(h, compute_uv=False)
+    p = s / (jnp.sum(s) + 1e-9)
+    entropy = -jnp.sum(p * jnp.log(p + 1e-9))
+    return jnp.exp(entropy)
+
+
+def _dormant_fraction(activation, threshold=0.025):
+    h = activation.reshape(-1, activation.shape[-1])
+    mean_act = jnp.mean(jnp.abs(h), axis=0)
+    score = mean_act / (jnp.mean(mean_act) + 1e-9)
+    return jnp.mean(score <= threshold).astype(jnp.float32)
+
+
+def _saturation_rate(pre_activation, threshold=0.95):
+    # Assumes a tanh nonlinearity follows this probe site. Signed
+    # average-then-threshold: per unit take the signed mean of tanh over the
+    # probe set (the rollout's states), then report the fraction of units whose
+    # |mean| exceeds the threshold -- units pinned to one rail across these
+    # states (constant / non-differentiating). This is the no-EMA, within-rollout
+    # counterpart of sat_persist, which applies the *same* per-unit signed mean
+    # (_mean_tanh_sites) but EMAs it across rollouts before thresholding.
+    h = pre_activation.reshape(-1, pre_activation.shape[-1])
+    mean_tanh = jnp.mean(jnp.tanh(h), axis=0)
+    return jnp.mean(jnp.abs(mean_tanh) > threshold).astype(jnp.float32)
+
+
+def _compute_plasticity_metrics(params, apply_fn, init_hstate, traj_obs, dormant_threshold=0.025):
+    """RTU (tanh) plasticity metrics as a {column_name: scalar} dict from one
+    extra forward pass: effective rank at pre1/rtu/pre2, signed saturation rate
+    at the tanh sites (pre1/pre2), Sokar dormant fraction at the post-ReLU RTU
+    outputs.
+    """
+    _, state = apply_fn(params, init_hstate, traj_obs, mutable=["intermediates"])
+    inter = state["intermediates"]
+    a_pre1, c_pre1 = inter["actor_pre1"][0], inter["critic_pre1"][0]
+    a_rtu, c_rtu = inter["actor_rtu_out"][0], inter["critic_rtu_out"][0]
+    a_pre2, c_pre2 = inter["actor_pre2"][0], inter["critic_pre2"][0]
+    return {
+        "eff_rank_actor_pre1": _effective_rank(a_pre1),
+        "eff_rank_critic_pre1": _effective_rank(c_pre1),
+        "eff_rank_actor_rtu": _effective_rank(a_rtu),
+        "eff_rank_critic_rtu": _effective_rank(c_rtu),
+        "eff_rank_actor_pre2": _effective_rank(a_pre2),
+        "eff_rank_critic_pre2": _effective_rank(c_pre2),
+        "sat_rate_actor_pre1": _saturation_rate(a_pre1),
+        "sat_rate_critic_pre1": _saturation_rate(c_pre1),
+        "sat_rate_actor_pre2": _saturation_rate(a_pre2),
+        "sat_rate_critic_pre2": _saturation_rate(c_pre2),
+        "dormant_actor_rtu": _dormant_fraction(a_rtu, dormant_threshold),
+        "dormant_critic_rtu": _dormant_fraction(c_rtu, dormant_threshold),
+    }
+
+
+def _compute_plasticity_metrics_mlp(params, apply_fn, init_hstate, traj_obs, has_mid=True):
+    """Vanilla ActorCriticMLP analogue of _compute_plasticity_metrics.
+
+    ActorCriticMLP is feedforward and all-tanh, with a linear wide layer
+    (dense2, width d_hidden) in the position the RTU occupies. Probe sites:
+      actor/critic_pre1, actor/critic_pre2 (pre-tanh) -> effective rank +
+          saturation rate, exactly as in the RTU net.
+      actor/critic_mid (the linear wide layer)        -> effective rank only.
+
+    There is no dormancy metric: that layer is linear (no ReLU) and has a
+    rescaling symmetry (scale dense2 up, dense3 down -> identical function), so
+    any per-unit magnitude/variance "dormant" measure is ill-defined. The linear
+    analogue of dead capacity is rank deficiency, already captured by the mid
+    effective rank. The dormant_*_rtu slots are therefore NaN (plots omit them).
+
+    Returns the same dict keys as _compute_plasticity_metrics (eff_rank at the
+    wide layer goes in the *_rtu slot); dormant_*_rtu are NaN.
+    """
+    _, state = apply_fn(params, init_hstate, traj_obs, mutable=["intermediates"])
+    inter = state["intermediates"]
+    a_pre1, c_pre1 = inter["actor_pre1"][0], inter["critic_pre1"][0]
+    a_pre2, c_pre2 = inter["actor_pre2"][0], inter["critic_pre2"][0]
+    nan = jnp.float32(jnp.nan)
+    out = {
+        "eff_rank_actor_pre1": _effective_rank(a_pre1),
+        "eff_rank_critic_pre1": _effective_rank(c_pre1),
+        "eff_rank_actor_pre2": _effective_rank(a_pre2),
+        "eff_rank_critic_pre2": _effective_rank(c_pre2),
+        "sat_rate_actor_pre1": _saturation_rate(a_pre1),
+        "sat_rate_critic_pre1": _saturation_rate(c_pre1),
+        "sat_rate_actor_pre2": _saturation_rate(a_pre2),
+        "sat_rate_critic_pre2": _saturation_rate(c_pre2),
+    }
+    # Wide middle layer (the '*_rtu' slot): linear, so effective rank only and
+    # NaN dormancy. Absent entirely when use_middle_layer is off.
+    if has_mid:
+        out["eff_rank_actor_rtu"] = _effective_rank(inter["actor_mid"][0])
+        out["eff_rank_critic_rtu"] = _effective_rank(inter["critic_mid"][0])
+        out["dormant_actor_rtu"] = nan
+        out["dormant_critic_rtu"] = nan
+    return out
+
+
+def _compute_plasticity_metrics_relu(params, apply_fn, init_hstate, traj_obs,
+                                     wide_inter: str | None = "rtu_out",
+                                     dormant_threshold=0.025):
+    """ReLU variant metrics dict: effective rank AND Sokar dormant fraction at
+    every (post-ReLU) probe site -- pre1, the wide middle layer, pre2. No tanh
+    saturation (this net has no tanh). The wide-layer activations come from
+    `wide_inter` (the RTU output for the recurrent net, the wide Dense 'mid' for
+    the feedforward MLP) but are emitted into the unified '*_rtu' column so the
+    plotting layer set is architecture-independent."""
+    _, state = apply_fn(params, init_hstate, traj_obs, mutable=["intermediates"])
+    inter = state["intermediates"]
+    sites = {
+        "actor_pre1": inter["actor_pre1"][0], "critic_pre1": inter["critic_pre1"][0],
+        "actor_pre2": inter["actor_pre2"][0], "critic_pre2": inter["critic_pre2"][0],
+    }
+    if wide_inter is not None:
+        sites["actor_rtu"] = inter[f"actor_{wide_inter}"][0]
+        sites["critic_rtu"] = inter[f"critic_{wide_inter}"][0]
+    out = {}
+    for k, h in sites.items():
+        out[f"eff_rank_{k}"] = _effective_rank(h)
+        out[f"dormant_{k}"] = _dormant_fraction(h, dormant_threshold)
+    return out
+
+
+def _zero_plasticity_metrics():
+    return {}
+
+
+def _mean_tanh_sites(params, apply_fn, init_hstate, traj_obs):
+    """Per-unit signed mean tanh at the tanh sites (pre1/pre2), as a dict
+    {site: (width,) vector}; feeds the persistent-saturation EMA. tanh is applied
+    per state then averaged (signed) so a rail-flipping unit averages toward 0."""
+    _, state = apply_fn(params, init_hstate, traj_obs, mutable=["intermediates"])
+    inter = state["intermediates"]
+
+    def _mt(name):
+        h = inter[name][0]
+        h = h.reshape(-1, h.shape[-1])
+        return jnp.mean(jnp.tanh(h), axis=0)
+
+    return {
+        "actor_pre1": _mt("actor_pre1"), "critic_pre1": _mt("critic_pre1"),
+        "actor_pre2": _mt("actor_pre2"), "critic_pre2": _mt("critic_pre2"),
+    }
+
+
+def _mean_abs_act_sites(params, apply_fn, init_hstate, traj_obs,
+                        wide_inter: str | None = "rtu_out"):
+    """Per-unit mean |activation| at the post-ReLU sites (pre1/wide/pre2), as a
+    dict {site: (width,) vector}; feeds the persistent-dormancy EMA. The wide
+    site reads `wide_inter` (RTU output or MLP 'mid') under the unified 'rtu'
+    key."""
+    _, state = apply_fn(params, init_hstate, traj_obs, mutable=["intermediates"])
+    inter = state["intermediates"]
+    names = {
+        "actor_pre1": "actor_pre1", "critic_pre1": "critic_pre1",
+        "actor_pre2": "actor_pre2", "critic_pre2": "critic_pre2",
+    }
+    if wide_inter is not None:
+        names["actor_rtu"] = f"actor_{wide_inter}"
+        names["critic_rtu"] = f"critic_{wide_inter}"
+
+    def _ma(name):
+        h = inter[name][0]
+        h = h.reshape(-1, h.shape[-1])
+        return jnp.mean(jnp.abs(h), axis=0)
+
+    return {k: _ma(v) for k, v in names.items()}
+
+
+def _sat_persist_from_ema(ema, threshold):
+    """Persistent-saturation metrics from the EMA dict: fraction of units pinned
+    to one rail (|EMA signed-mean-tanh| > threshold), per site."""
+    return {
+        f"sat_persist_{k}": jnp.mean((jnp.abs(v) > threshold).astype(jnp.float32))
+        for k, v in ema.items()
+    }
+
+
+def _dormant_persist_from_ema(ema, threshold):
+    """Persistent-dormancy metrics from the EMA dict: Sokar score on the EMA'd
+    per-unit mean |activation|, fraction with score <= threshold, per site."""
+    out = {}
+    for k, v in ema.items():
+        score = v / (jnp.mean(v) + 1e-9)
+        out[f"dormant_persist_{k}"] = jnp.mean((score <= threshold).astype(jnp.float32))
+    return out
+
+
+def _pers_ema_init(config):
+    """Initial per-unit EMA carry (dict {site: zeros(width)}), agent-specific.
+    tanh nets track pre1/pre2 (hidden_size); the ReLU net also tracks the RTU
+    output (2*d_hidden). Empty for agents without probes."""
+    H = config.hidden_size
+    if not _should_probe(config):
+        return {}
+    if config.activation in ("relu", "crelu"):
+        ema = {
+            "actor_pre1": jnp.zeros(H), "critic_pre1": jnp.zeros(H),
+            "actor_pre2": jnp.zeros(H), "critic_pre2": jnp.zeros(H),
+        }
+        wide_inter = _wide_site_name(config)
+        if wide_inter is not None:
+            # wide middle layer: RTU output (2*d_hidden) or MLP wide Dense (d_hidden)
+            wide = 2 * config.d_hidden if _agent_is_rtu(config.agent_type) else config.d_hidden
+            ema["actor_rtu"] = jnp.zeros(wide)
+            ema["critic_rtu"] = jnp.zeros(wide)
+        return ema
+    return {
+        "actor_pre1": jnp.zeros(H), "critic_pre1": jnp.zeros(H),
+        "actor_pre2": jnp.zeros(H), "critic_pre2": jnp.zeros(H),
+    }
+
+
+# ----------------------------------------------------------------------------
+# -- Gradient-norm helpers --
+#
+# Per-layer l0 / l1 / l2 norms of the raw (pre-clip) gradient, computed each
+# minibatch update and averaged over a rollout. Each top-level Flax module is
+# one "layer" (the whole RTU is lumped); LayerNorm modules are excluded. l0 is
+# the count of entries with |g| > eps (1e-8) — meaningful at the post-ReLU RTU
+# site, ~flat for tanh layers (tanh' is never exactly 0), so l1/l2 carry the
+# plasticity signal there. Param-count weighting across layers is done offline.
+# ----------------------------------------------------------------------------
+_GRAD_NORM_EPS = 1e-8
+
+
+def _grad_layer_name(path):
+    parts = list(path)
+    if parts and parts[0] == "params":
+        parts = parts[1:]
+    return parts[0] if parts else ""
+
+
+def _grad_layer_buckets(tree):
+    """Map each non-LayerNorm leaf to its top-level module ('actor_dense1',
+    'actor_rtu', ...), lumping the whole RTU together. Returns {layer: [leaves]}."""
+    flat = traverse_util.flatten_dict(tree)
+    buckets = {}
+    for path, arr in flat.items():
+        layer = _grad_layer_name(path)
+        if not layer or "layernorm" in layer.lower():
+            continue
+        buckets.setdefault(layer, []).append(arr)
+    return buckets
+
+
+def _per_layer_grad_norms(grads, eps=_GRAD_NORM_EPS):
+    """Per-layer (l0, l1, l2) norms of the raw gradient. Returns {layer: (l0, l1, l2)}."""
+    buckets = _grad_layer_buckets(grads)
+    norms = {}
+    for layer in sorted(buckets):
+        v = jnp.concatenate([a.reshape(-1) for a in buckets[layer]])
+        absv = jnp.abs(v)
+        norms[layer] = (
+            jnp.sum(absv > eps).astype(jnp.float32),  # l0
+            jnp.sum(absv),                            # l1
+            jnp.sqrt(jnp.sum(v * v)),                 # l2
+        )
+    return norms
+
+
+def _zero_grad_norms(params, epochs, num_mini_batch):
+    """Zero grad-norm tree matching the scanned (epochs, num_mini_batch) shape,
+    for the frozen branch of the update cond."""
+    z = jnp.zeros((epochs, num_mini_batch), dtype=jnp.float32)
+    return {layer: (z, z, z) for layer in sorted(_grad_layer_buckets(params))}
+
+
+def _grad_layer_param_counts(params):
+    """Static per-layer parameter counts for offline param-count weighting."""
+    buckets = _grad_layer_buckets(params)
+    return {
+        layer: jnp.float32(sum(int(a.size) for a in buckets[layer]))
+        for layer in sorted(buckets)
+    }
 
 
 @jax.jit
@@ -229,9 +582,20 @@ def calculate_average_reward_gae(traj_batch, last_val, gamma, gae_lambda):
 
 @partial(jax.jit, static_argnums=(1, 9, 12))
 def loss_fn(
-    params, agent_fn, traj_batch, gae, targets, init_hstate, clip_eps, vf_coef, ent_coef,
-    use_l2_init=False, initial_params=None, l2_init_multipliers=None,
-    use_spectral_reg=False, spectral_reg_multipliers=None,
+    params,
+    agent_fn,
+    traj_batch,
+    gae,
+    targets,
+    init_hstate,
+    clip_eps,
+    vf_coef,
+    ent_coef,
+    use_l2_init=False,
+    initial_params=None,
+    l2_init_multipliers=None,
+    use_spectral_reg=False,
+    spectral_reg_multipliers=None,
 ):
     rnn_in = traj_batch.obs
     _, pi, value = agent_fn(params, init_hstate, rnn_in)
@@ -265,7 +629,9 @@ def loss_fn(
         # optax.l2_loss(a, b) = 0.5 * (a - b)^2 per element
         l2_init_loss = jax.tree_util.tree_map(
             lambda m, p, p0: m * optax.l2_loss(p, p0).sum(),
-            l2_init_multipliers, params, initial_params,
+            l2_init_multipliers,
+            params,
+            initial_params,
         )
         total_loss = total_loss + jax.tree_util.tree_reduce(
             lambda a, b: a + b, l2_init_loss
@@ -295,12 +661,14 @@ def loss_fn(
             """Estimate σ₁(w_2d) via power iteration (1 step by default)."""
             u = jnp.ones((w_2d.shape[0],), dtype=w_2d.dtype)
             u = u / (jnp.linalg.norm(u) + 1e-12)
+
             def _step(u, _):
                 v = w_2d.T @ u
                 v = v / (jnp.linalg.norm(v) + 1e-12)
                 u_new = w_2d @ v
                 u_new = u_new / (jnp.linalg.norm(u_new) + 1e-12)
                 return u_new, v
+
             u, vs = jax.lax.scan(_step, u, None, length=num_iters)
             v = vs[-1]
             sigma = u @ w_2d @ v
@@ -333,19 +701,21 @@ def loss_fn(
                 d_out = param.shape[-1]
                 w_2d = jnp.transpose(param, (3, 0, 1, 2)).reshape((d_out, -1))
                 sigma = _power_iteration_sigma1(w_2d)
-                return multiplier * jnp.square(sigma ** _SR_K - 1.0)
+                return multiplier * jnp.square(sigma**_SR_K - 1.0)
 
             # --- Dense / multiplicative weight matrices (2-D) ---
             # Paper: (σ₁(W)^k − 1)²
             if param.ndim == 2:
                 sigma = _power_iteration_sigma1(param)
-                return multiplier * jnp.square(sigma ** _SR_K - 1.0)
+                return multiplier * jnp.square(sigma**_SR_K - 1.0)
 
             # Anything else (scalars, etc.) – skip
             return jnp.zeros((), dtype=param.dtype)
 
         spectral_losses = jax.tree_util.tree_map_with_path(
-            _spectral_leaf, spectral_reg_multipliers, params,
+            _spectral_leaf,
+            spectral_reg_multipliers,
+            params,
         )
         total_loss = total_loss + jax.tree_util.tree_reduce(
             lambda a, b: a + b, spectral_losses
@@ -478,7 +848,13 @@ def env_step(runner_state, _):
 
 @jax.jit
 def update_minbatch(carry_in, batch_info):
-    train_state, config, initial_params, l2_init_multipliers, spectral_reg_multipliers = carry_in
+    (
+        train_state,
+        config,
+        initial_params,
+        l2_init_multipliers,
+        spectral_reg_multipliers,
+    ) = carry_in
     minibatch, init_hstate = batch_info
     # minibatch: (seq_len,minibatch_size, _)
     # init_hstate: (1, d_hidden)
@@ -500,8 +876,11 @@ def update_minbatch(carry_in, batch_info):
         config.use_spectral_reg,
         spectral_reg_multipliers,
     )
+    # Per-layer grad norms on the RAW (pre-clip) gradient, before the optimizer
+    # chain's clip_by_global_norm would cap l2 at max_grad_norm.
+    grad_norms = _per_layer_grad_norms(grads)
     train_state = train_state.apply_gradients(grads=grads)
-    return (train_state, config, initial_params, l2_init_multipliers, spectral_reg_multipliers), total_loss
+    return (train_state, config, initial_params, l2_init_multipliers, spectral_reg_multipliers), (total_loss, grad_norms)
 
 
 """
@@ -569,7 +948,7 @@ def update_epoch(update_state, unused):
         config, hstate_batch, batch, rng, train_state
     )
     carry_in = (train_state, config, initial_params, l2_init_multipliers, spectral_reg_multipliers)
-    carry_out, total_loss = jax.lax.scan(update_minbatch, carry_in, minibatches_info)
+    carry_out, minibatch_out = jax.lax.scan(update_minbatch, carry_in, minibatches_info)
     train_state = carry_out[0]
     update_state = (
         train_state,
@@ -584,7 +963,7 @@ def update_epoch(update_state, unused):
         l2_init_multipliers,
         spectral_reg_multipliers,
     )
-    return update_state, total_loss
+    return update_state, minibatch_out
 
 
 @jax.jit
@@ -614,7 +993,9 @@ def update_step(update_state):
 def experiment(rng, config: TrainConfig):
     kwargs = dict(config.env_kwargs)
 
-    print(f"Creating env {config.env_id} with aperture size {config.aperture_size} and kwargs {kwargs}")
+    print(
+        f"Creating env {config.env_id} with aperture size {config.aperture_size} and kwargs {kwargs}"
+    )
 
     env = make(config.env_id, aperture_size=config.aperture_size, **kwargs)
 
@@ -687,17 +1068,23 @@ def experiment(rng, config: TrainConfig):
         RealTimeActorCriticConvHintRTU,
     ):
         kwargs["conv"] = config.conv
+    if _agent_class is ActorCriticMLP:
+        kwargs["use_middle_layer"] = config.use_middle_layer
+        kwargs["use_midlayer_layernorm"] = config.use_midlayer_layernorm
 
-    # Create and initialize the network.
+    # Create and initialize the network. `agent` is dynamically dispatched via
+    # getAgent(config.agent_type); pyright sees only the base type so it can't
+    # verify variant-specific kwargs like use_layernorm. The activation (tanh or
+    # relu) comes from the explicit `representation.activation` config field.
     network = agent(
         action_dim=action_dim,
         activation=config.activation,
         hidden_size=config.hidden_size,
         d_hidden=config.d_hidden,
         cont=False,
-        use_sinusoidal_encoding=config.use_sinusoidal_encoding,
-        use_reward_trace=config.use_reward_trace,
-        use_layernorm=config.use_layernorm,
+        use_sinusoidal_encoding=config.use_sinusoidal_encoding,  # pyright: ignore[reportCallIssue]
+        use_reward_trace=config.use_reward_trace,  # pyright: ignore[reportCallIssue]
+        use_layernorm=config.use_layernorm,  # pyright: ignore[reportCallIssue]
         **kwargs,
     )
 
@@ -766,6 +1153,10 @@ def experiment(rng, config: TrainConfig):
         init_hstate = agent.initialize_memory(1, config.d_hidden, d_input)
     network_params = network.init(_rng, init_hstate, init_x)
 
+    # Static per-layer parameter counts for offline param-count weighting of
+    # the gradient norms.
+    grad_nparams = _grad_layer_param_counts(network_params)
+
     def make_label_tree(params):
         flat = traverse_util.flatten_dict(params, sep="/")
 
@@ -791,12 +1182,22 @@ def experiment(rng, config: TrainConfig):
                 "pi": optax.chain(
                     optax.clip_by_global_norm(config.max_grad_norm),
                     optax.add_decayed_weights(config.l2_reg_pi),
-                    optax.adam(config.alpha_pi, b1=config.adam_b1_pi, b2=config.adam_b2_pi, eps=config.adam_eps_pi)
+                    optax.adam(
+                        config.alpha_pi,
+                        b1=config.adam_b1_pi,
+                        b2=config.adam_b2_pi,
+                        eps=config.adam_eps_pi,
+                    ),
                 ),
                 "vf": optax.chain(
                     optax.clip_by_global_norm(config.max_grad_norm),
                     optax.add_decayed_weights(config.l2_reg_vf),
-                    optax.adam(config.alpha_vf, b1=config.adam_b1_vf, b2=config.adam_b2_vf, eps=config.adam_eps_vf)
+                    optax.adam(
+                        config.alpha_vf,
+                        b1=config.adam_b1_vf,
+                        b2=config.adam_b2_vf,
+                        eps=config.adam_eps_vf,
+                    ),
                 ),
                 "frozen": optax.set_to_zero(),
             },
@@ -807,11 +1208,21 @@ def experiment(rng, config: TrainConfig):
             {
                 "pi": optax.chain(
                     optax.add_decayed_weights(config.l2_reg_pi),
-                    optax.adam(config.alpha_pi, b1=config.adam_b1_pi, b2=config.adam_b2_pi, eps=config.adam_eps_pi)
+                    optax.adam(
+                        config.alpha_pi,
+                        b1=config.adam_b1_pi,
+                        b2=config.adam_b2_pi,
+                        eps=config.adam_eps_pi,
+                    ),
                 ),
                 "vf": optax.chain(
                     optax.add_decayed_weights(config.l2_reg_vf),
-                    optax.adam(config.alpha_vf, b1=config.adam_b1_vf, b2=config.adam_b2_vf, eps=config.adam_eps_vf)
+                    optax.adam(
+                        config.alpha_vf,
+                        b1=config.adam_b1_vf,
+                        b2=config.adam_b2_vf,
+                        eps=config.adam_eps_vf,
+                    ),
                 ),
                 "frozen": optax.set_to_zero(),
             },
@@ -834,7 +1245,7 @@ def experiment(rng, config: TrainConfig):
             flat_labels = traverse_util.flatten_dict(labels, sep="/")
             lam_map = {"pi": lambda_pi, "vf": lambda_vf}
             flat_mult = {
-                k: jnp.array(lam_map.get(flat_labels[k], 0.0))
+                k: jnp.array(lam_map.get(str(flat_labels[k]), 0.0))
                 for k in flat_params
             }
             return traverse_util.unflatten_dict(
@@ -842,7 +1253,10 @@ def experiment(rng, config: TrainConfig):
             )
 
         l2_init_multipliers = _make_l2_init_multipliers(
-            network_params, labels, config.lambda_l2_init_pi, config.lambda_l2_init_vf,
+            network_params,
+            labels,
+            config.lambda_l2_init_pi,
+            config.lambda_l2_init_vf,
         )
     else:
         initial_params = None
@@ -855,12 +1269,13 @@ def experiment(rng, config: TrainConfig):
     # multiplier tree is None and the compile-time guard in loss_fn skips
     # the whole block.
     if config.use_spectral_reg:
+
         def _make_spectral_reg_multipliers(params, labels, lambda_pi, lambda_vf):
             flat_params = traverse_util.flatten_dict(params, sep="/")
             flat_labels = traverse_util.flatten_dict(labels, sep="/")
             lam_map = {"pi": lambda_pi, "vf": lambda_vf}
             flat_mult = {
-                k: jnp.array(lam_map.get(flat_labels[k], 0.0))
+                k: jnp.array(lam_map.get(str(flat_labels[k]), 0.0))
                 for k in flat_params
             }
             return traverse_util.unflatten_dict(
@@ -868,8 +1283,10 @@ def experiment(rng, config: TrainConfig):
             )
 
         spectral_reg_multipliers = _make_spectral_reg_multipliers(
-            network_params, labels,
-            config.lambda_spectral_pi, config.lambda_spectral_vf,
+            network_params,
+            labels,
+            config.lambda_spectral_pi,
+            config.lambda_spectral_vf,
         )
     else:
         spectral_reg_multipliers = None
@@ -886,8 +1303,7 @@ def experiment(rng, config: TrainConfig):
         # Pre-compute which leaves belong to the last layer, keyed by flattened path.
         _flat_params = traverse_util.flatten_dict(network_params, sep="/")
         _last_layer_keys = frozenset(
-            k for k in _flat_params
-            if "actor_mean" in k or "critic_value" in k
+            k for k in _flat_params if "actor_mean" in k or "critic_value" in k
         )
 
         def _is_last_layer(path_str):
@@ -916,12 +1332,15 @@ def experiment(rng, config: TrainConfig):
             fresh_opt_state = tx.init(new_params)
             new_opt_state = jax.tree_util.tree_map_with_path(
                 lambda path, fresh_val, old_val: (
-                    fresh_val if any(
-                        (hasattr(k, "key") and (
-                            "actor_mean" in k.key or "critic_value" in k.key
-                        ))
+                    fresh_val
+                    if any(
+                        (
+                            hasattr(k, "key")
+                            and ("actor_mean" in k.key or "critic_value" in k.key)
+                        )
                         for k in path
-                    ) else old_val
+                    )
+                    else old_val
                 ),
                 fresh_opt_state,
                 train_state.opt_state,
@@ -936,6 +1355,7 @@ def experiment(rng, config: TrainConfig):
     # Shrink and Perturb: shrink all params towards zero and add Gaussian noise,
     # then reinitialize optimizer state.  Guarded by `config.use_shrink_and_perturb`.
     if config.use_shrink_and_perturb:
+
         def _shrink_and_perturb(train_state, rng):
             """Apply shrink-and-perturb to all network parameters."""
             rng, subkey = jax.random.split(rng)
@@ -959,31 +1379,24 @@ def experiment(rng, config: TrainConfig):
             )
             return train_state, rng
 
-    # NTK / churn metrics: collect a fixed batch of reference observations from a
-    # short random-policy rollout.  This branches off the env at its reset state
-    # via a derived key (rng is not consumed, so the training stream is
-    # unaffected) and the rollout's terminal state is discarded.  `reward_dim`
-    # is the width of the `last_reward` feature (1, or 1 + hint_dim for hint
-    # envs), needed to build zero-padded reference obs tuples.
+    # NTK / churn metrics reference batch.  No fixed batch is collected here: in
+    # a non-stationary env a frozen reference set drifts off-distribution, so the
+    # reference batch is instead sampled fresh from the *current* policy at each
+    # metric step via a short probe rollout (see `experiment_step`).  This keeps
+    # it on the current state distribution and held out from the update being
+    # measured.  `reward_dim` is the width of the `last_reward` feature (1, or
+    # 1 + hint_dim for hint envs), needed to build the reference obs tuples.
     reward_dim = hint_shape[0]
-    if config.compute_ntk:
-        ref_rng = jax.random.fold_in(rng, 7919)
 
-        def _ref_step(carry, _):
-            r, st = carry
-            r, a_rng, s_rng = jax.random.split(r, 3)
-            ref_action = jax.random.randint(a_rng, (), 0, action_dim)
-            ref_obs, st, _, _, _ = env.step(
-                s_rng, st, ref_action, env.default_params
-            )
-            ref_img = ref_obs["image"] if isinstance(ref_obs, Mapping) else ref_obs
-            return (r, st), ref_img
-
-        (_, _), x_ref = jax.lax.scan(
-            _ref_step, (ref_rng, env_state), None, length=config.n_ref
-        )
+    # Weight-drift reference: a frozen copy of theta_0 for the ||theta - theta_0||
+    # metric.  Deliberately independent of `use_l2_init` (which only allocates
+    # `initial_params` when the mitigation is on) so drift is measurable for the
+    # vanilla agent too -- enabling an apples-to-apples vanilla-vs-w0-reg compare.
+    # Closed over by experiment_step; never threaded through carry.
+    if config.compute_weight_drift:
+        drift_w0 = jax.tree_util.tree_map(lambda p: p.copy(), network_params)
     else:
-        x_ref = None
+        drift_w0 = None
 
     env_step_state = (
         train_state,
@@ -999,9 +1412,11 @@ def experiment(rng, config: TrainConfig):
         init_hstate,
     )
 
-    @scan_tqdm(config.num_updates, print_rate=max(1, min(100, config.num_updates // 20)))
+    @scan_tqdm(
+        config.num_updates, print_rate=max(1, min(100, config.num_updates // 20))
+    )
     def experiment_step(carry, iteration_idx):
-        env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers = carry
+        env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers, pers_ema = carry
         (
             train_state,
             gymnax_state,
@@ -1111,6 +1526,60 @@ def experiment(rng, config: TrainConfig):
             traj_batch, last_val, config.gamma, config.gae_lambda
         )
 
+        # Plasticity-metric forward pass on the just-completed rollout.
+        # Uses pre-update params and the rollout's actual init hidden state
+        # (`hstate`, the carry from the previous iteration), so the captured
+        # activations match what the rollout actually saw. Guarded statically on
+        # agent_type; each agent returns a {column_name: scalar} plasticity dict.
+        _pp = (train_state.params, train_state.apply_fn, hstate, traj_batch.obs)
+        _relu = config.activation in ("relu", "crelu")
+        _probe = _should_probe(config)
+        _wide = _wide_site_name(config)
+        if _probe:
+            if _relu:
+                # all-ReLU/crelu net (RTU or MLP): dormancy + effective rank at
+                # every post-ReLU site. The wide middle layer (RTU output or the
+                # MLP's wide Dense) goes into the unified '*_rtu' column; it is
+                # omitted entirely for a vanilla MLP with use_middle_layer off.
+                plasticity = _compute_plasticity_metrics_relu(
+                    *_pp, wide_inter=_wide, dormant_threshold=config.dormant_threshold
+                )
+            elif _agent_is_rtu(config.agent_type):
+                plasticity = _compute_plasticity_metrics(
+                    *_pp, dormant_threshold=config.dormant_threshold
+                )
+            else:
+                plasticity = _compute_plasticity_metrics_mlp(
+                    *_pp, has_mid=_wide is not None
+                )
+        else:
+            plasticity = _zero_plasticity_metrics()
+
+        # Persistent metric. Per rollout take the per-unit mean (signed tanh for
+        # the tanh nets, |activation| for the ReLU nets), EMA it across rollouts
+        # (decay persist_decay) in the pers_ema dict carry, then threshold
+        # AFTER the EMA: persistent saturation (|EMA| > 0.95) or persistent
+        # dormancy (Sokar score <= 0.025). Empty for agents without probes.
+        if _probe and _relu:
+            means = _mean_abs_act_sites(*_pp, wide_inter=_wide)
+            pers_ema = {
+                k: config.persist_decay * pers_ema[k]
+                + (1.0 - config.persist_decay) * means[k]
+                for k in means
+            }
+            persist = _dormant_persist_from_ema(pers_ema, config.dormant_threshold)
+        elif _probe:
+            means = _mean_tanh_sites(*_pp)
+            pers_ema = {
+                k: config.persist_decay * pers_ema[k]
+                + (1.0 - config.persist_decay) * means[k]
+                for k in means
+            }
+            persist = _sat_persist_from_ema(pers_ema, config.sat_persist_threshold)
+        else:
+            persist = {}
+        metrics = {**plasticity, **persist}
+
         # Conditionally perform the update based on how many env steps have elapsed.
         # If freeze_steps <= 0, updates are always performed.
         # Otherwise, once log_env_state.timestep exceeds freeze_steps, we stop updating.
@@ -1144,13 +1613,16 @@ def experiment(rng, config: TrainConfig):
                 _l2_init_multipliers,
                 _spectral_reg_multipliers,
             ) = update_state
-            return (train_state, rng), _zero_loss_info(config)
+            return (train_state, rng), (
+                _zero_loss_info(config),
+                _zero_grad_norms(network_params, config.epochs, config.num_mini_batch),
+            )
 
         should_update = jnp.logical_or(
             config.freeze_steps <= 0,
             log_env_state.timestep <= config.freeze_steps,
         )
-        (train_state, rng), loss_info = jax.lax.cond(
+        (train_state, rng), (loss_info, grad_norms) = jax.lax.cond(
             should_update, update_step, skip_update, update_state
         )
 
@@ -1189,15 +1661,38 @@ def experiment(rng, config: TrainConfig):
             )
 
         # NTK rank / condition number and per-update churn for the value and
-        # policy heads, evaluated on the fixed reference batch whenever this
-        # update's env-step window crosses a multiple of ntk_freq.  ntk_freq is
-        # in *env steps* (matching the DQN ntk_freq and this file's
+        # policy heads, evaluated on a fresh probe-rollout reference batch
+        # whenever this update's env-step window crosses a multiple of ntk_freq.
+        # ntk_freq is in *env steps* (matching the DQN ntk_freq and this file's
         # reset_interval / sp_interval), but metrics can only be produced at
         # update boundaries, so the finest achievable spacing is rollout_steps.
-        # lax.cond skips the (expensive) Jacobian work on non-metric updates;
-        # disabled updates / heads report NaN.  Emitted as per-update scalars.
+        # lax.cond skips the (expensive) Jacobian + probe work on non-metric
+        # updates; disabled updates / heads report NaN.  Emitted as per-update
+        # scalars.
         if config.compute_ntk:
+
             def _do_ntk(_):
+                # Probe rollout: step the env n_ref times with the *current*
+                # (post-update) policy from the current env state to obtain a
+                # reference batch that is on the current state distribution and
+                # held out from this update's training data.  It reuses the same
+                # `env_step` body as the real rollout but runs on a derived RNG
+                # (training RNG stream untouched) and its transitions are
+                # discarded -- only their observation images feed the metrics.
+                # env_step_state is the post-rollout runner_state; we swap in the
+                # current train_state (index 0) and the probe RNG (index 9).
+                probe_rng = jax.random.fold_in(rng, 104729)
+                probe_runner_state = (
+                    train_state,
+                    *env_step_state[1:9],  # gymnax_state .. hint_trace (post-rollout)
+                    probe_rng,
+                    env_step_state[10],  # hstate (post-rollout)
+                )
+                _, (probe_traj, _) = jax.lax.scan(
+                    env_step, probe_runner_state, length=config.n_ref
+                )
+                x_ref = probe_traj.obs[0]  # reference images, [n_ref, H, W, C]
+
                 return compute_ppo_metrics(
                     train_state.apply_fn,
                     ntk_params_before,
@@ -1206,6 +1701,8 @@ def experiment(rng, config: TrainConfig):
                     x_ref,
                     action_dim,
                     reward_dim,
+                    config.chunked_ref,
+                    labels,
                     compute_value=True,
                     compute_policy=True,
                 )
@@ -1218,6 +1715,42 @@ def experiment(rng, config: TrainConfig):
             )
         else:
             ntk_metrics = nan_ppo_metrics()
+
+        # Weight norm: L2 norm of the post-update params, split pi / vf / total
+        # (like weight drift below), gated on its own weight_norm_freq
+        # (independent of the NTK cadence above).  Cheap -- no reference batch
+        # or Jacobian -- so this is just an L2 reduction over the param tree.
+        # NaN triple on non-metric updates / when disabled.  Per-update scalars.
+        if config.compute_weight_norm:
+            is_wn_step = _crossed_interval(
+                start_timestep, log_env_state.timestep, config.weight_norm_freq
+            )
+            weight_norm_metric = jax.lax.cond(
+                is_wn_step,
+                lambda _: weight_norm(ntk_params_after, labels),
+                lambda _: nan_weight_norm(),
+                operand=None,
+            )
+        else:
+            weight_norm_metric = nan_weight_norm()
+
+        # Weight drift: ||theta - theta_0|| (split pi / vf / total), gated on its
+        # own weight_drift_freq.  Like the weight norm it is a pure L2 reduction
+        # over the post-update params -- here against the frozen theta_0 closure
+        # `drift_w0` -- so no reference batch / Jacobian.  NaN triple on
+        # non-metric updates / when disabled.  Per-update scalars.
+        if config.compute_weight_drift:
+            is_wd_step = _crossed_interval(
+                start_timestep, log_env_state.timestep, config.weight_drift_freq
+            )
+            weight_drift_metric = jax.lax.cond(
+                is_wd_step,
+                lambda _: weight_drift(ntk_params_after, drift_w0, labels),
+                lambda _: nan_weight_drift(),
+                operand=None,
+            )
+        else:
+            weight_drift_metric = nan_weight_drift()
 
         # Collect a scalar reward summary for this iteration (mean reward over rollout)
         rewards = traj_batch.reward
@@ -1262,7 +1795,7 @@ def experiment(rng, config: TrainConfig):
         )
 
         # Optional lightweight debug
-        carry_out = (env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers)
+        carry_out = (env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers, pers_ema)
         return carry_out, (
             rewards,
             pos,
@@ -1271,11 +1804,16 @@ def experiment(rng, config: TrainConfig):
             object_collected_id,
             biome_regret,
             biome_rank,
+            metrics,
+            grad_norms,
             ntk_metrics,
+            weight_norm_metric,
+            weight_drift_metric,
         )
 
     # Run training loop with lax.scan (collect per-iteration rewards)
-    init_carry = (env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers)
+    pers_ema_init = _pers_ema_init(config)
+    init_carry = (env_step_state, train_state, rng, initial_params, l2_init_multipliers, spectral_reg_multipliers, pers_ema_init)
     last_carry, info = jax.lax.scan(
         experiment_step,
         PBar(id=config.id, carry=init_carry),
@@ -1289,7 +1827,11 @@ def experiment(rng, config: TrainConfig):
         object_collected_id,
         biome_regret,
         biome_rank,
+        metrics,
+        grad_norms,
         ntk_metrics,
+        weight_norm_metric,
+        weight_drift_metric,
     ) = info
     rewards = rewards.reshape((-1))
     pos = pos.reshape((-1, pos.shape[-1]))
@@ -1297,20 +1839,33 @@ def experiment(rng, config: TrainConfig):
     value_loss = jnp.mean(loss_info[1][0], axis=(-1, -2))
     policy_loss = jnp.mean(loss_info[1][1], axis=(-1, -2))
     entropy = jnp.mean(loss_info[1][2], axis=(-1, -2))
+    # Average each per-layer norm over the rollout's (epochs, num_mini_batch)
+    # updates -> one value per layer per norm per rollout.
+    grad_norms = jax.tree_util.tree_map(
+        lambda x: jnp.mean(x, axis=(-1, -2)), grad_norms
+    )
     biome_id = biome_id.reshape((-1))
     object_collected_id = object_collected_id.reshape((-1))
     biome_regret = biome_regret.reshape((-1))
     biome_rank = biome_rank.reshape((-1))
+    # metrics is a dict {column_name: (num_updates,) array} of plasticity
+    # metrics (eff_rank / saturation / dormancy / persistent variants), the set
+    # of keys depending on the agent.
     # Per-update NTK / churn metrics, one scalar per update (NaN on non-metric
     # updates).  Kept at per-update resolution; consumers subsample as needed.
     (
         value_ntk_rank,
-        value_ntk_cond,
+        value_ntk_eff_rank,
         value_churn,
         policy_ntk_rank,
-        policy_ntk_cond,
+        policy_ntk_eff_rank,
         policy_churn,
+        weight_update_norm_pi,
+        weight_update_norm_vf,
+        weight_update_norm_total,
     ) = ntk_metrics
+    weight_drift_pi, weight_drift_vf, weight_drift_total = weight_drift_metric
+    weight_norm_pi, weight_norm_vf, weight_norm_total = weight_norm_metric
     env_step_state = last_carry.carry[0]
     frames = env_step_state[2].frames
     return (
@@ -1321,15 +1876,23 @@ def experiment(rng, config: TrainConfig):
         object_collected_id,
         biome_regret,
         biome_rank,
+        metrics,
         (
             value_ntk_rank,
-            value_ntk_cond,
+            value_ntk_eff_rank,
             value_churn,
             policy_ntk_rank,
-            policy_ntk_cond,
+            policy_ntk_eff_rank,
             policy_churn,
+            weight_update_norm_pi,
+            weight_update_norm_vf,
+            weight_update_norm_total,
         ),
+        (weight_norm_pi, weight_norm_vf, weight_norm_total),
+        (weight_drift_pi, weight_drift_vf, weight_drift_total),
         frames,
+        grad_norms,
+        grad_nparams,
     )
 
 
@@ -1437,6 +2000,23 @@ def main():
         ntk_freq = int(hypers.get("experiment", {}).get("ntk_freq", 0))
         compute_ntk = ntk_freq > 0
         n_ref = int(hypers.get("experiment", {}).get("x_ref_steps", 128))
+        # Row-chunk size for the memory-bounded NTK Gram build; result-invariant,
+        # only trades peak memory against recompute.  Defaults to n_ref // 4.
+        chunked_ref = int(
+            hypers.get("experiment", {}).get("chunked_ref", max(n_ref // 4, 1))
+        )
+        chunked_ref = max(min(chunked_ref, n_ref), 1)
+        # Weight norm: independent of the NTK metrics, controlled by its own
+        # experiment.weight_norm_freq (env steps, rounded up to rollout_steps).
+        weight_norm_freq = int(hypers.get("experiment", {}).get("weight_norm_freq", 0))
+        compute_weight_norm = weight_norm_freq > 0
+        # Weight drift (||theta - theta_0||): independent of the NTK / weight-norm
+        # metrics, controlled by its own experiment.weight_drift_freq (env steps,
+        # rounded up to rollout_steps).
+        weight_drift_freq = int(
+            hypers.get("experiment", {}).get("weight_drift_freq", 0)
+        )
+        compute_weight_drift = weight_drift_freq > 0
         activation = str(
             hypers.get("representation", {}).get("activation", "tanh")
         ).lower()
@@ -1495,7 +2075,12 @@ def main():
             sparsity=hypers["representation"].get("sparsity", None),
             spectral_radius=hypers["representation"].get("spectral_radius", None),
             use_sinusoidal_encoding=bool(hypers.get("use_sinusoidal_encoding", False)),
-            use_reward_trace=bool(hypers.get("use_reward_trace", hypers.get("representation", {}).get("use_reward_trace", False))),
+            use_reward_trace=bool(
+                hypers.get(
+                    "use_reward_trace",
+                    hypers.get("representation", {}).get("use_reward_trace", False),
+                )
+            ),
             use_hint_trace=bool("_HT" in exp.agent),
             use_layernorm=bool(
                 hypers.get(
@@ -1503,8 +2088,30 @@ def main():
                     hypers.get("representation", {}).get("use_layernorm", False),
                 )
             ),
+            use_middle_layer=bool(
+                hypers.get("representation", {}).get("use_middle_layer", True)
+            ),
+            use_midlayer_layernorm=bool(
+                hypers.get("representation", {}).get(
+                    "use_midlayer_layernorm", False
+                )
+            ),
             conv=str(hypers.get("representation", {}).get("conv", "Conv2D")),
-            reward_trace_decay=float(hypers.get("reward_trace_decay", hypers.get("representation", {}).get("reward_trace_decay", 1.0))),
+            reward_trace_decay=float(
+                hypers.get(
+                    "reward_trace_decay",
+                    hypers.get("representation", {}).get("reward_trace_decay", 1.0),
+                )
+            ),
+            persist_decay=float(
+                hypers.get("experiment", {}).get("persist_decay", 0.99)
+            ),
+            sat_persist_threshold=float(
+                hypers.get("experiment", {}).get("sat_persist_threshold", 0.95)
+            ),
+            dormant_threshold=float(
+                hypers.get("experiment", {}).get("dormant_threshold", 0.025)
+            ),
             num_updates=num_updates,
             aperture_size=int(hypers["environment"]["aperture_size"]),
             render_mode=hypers["environment"].get("render_mode", "world_reward"),
@@ -1535,6 +2142,14 @@ def main():
             compute_ntk=compute_ntk,
             ntk_freq=max(ntk_freq, 1),
             n_ref=n_ref,
+            chunked_ref=chunked_ref,
+            compute_weight_norm=compute_weight_norm,
+            weight_norm_freq=max(weight_norm_freq, 1),
+            compute_weight_drift=compute_weight_drift,
+            weight_drift_freq=max(weight_drift_freq, 1),
+            compute_plasticity=bool(
+                hypers.get("experiment", {}).get("compute_plasticity", False)
+            ),
         )
         configs.append(config)
 
@@ -1550,16 +2165,26 @@ def main():
         object_collected_id,
         biome_regret,
         biome_rank,
+        metrics,
         (
             value_ntk_rank,
-            value_ntk_cond,
+            value_ntk_eff_rank,
             value_churn,
             policy_ntk_rank,
-            policy_ntk_cond,
+            policy_ntk_eff_rank,
             policy_churn,
+            weight_update_norm_pi,
+            weight_update_norm_vf,
+            weight_update_norm_total,
         ),
+        (weight_norm_pi, weight_norm_vf, weight_norm_total),
+        (weight_drift_pi, weight_drift_vf, weight_drift_total),
         frames,
+        grad_norms,
+        grad_nparams,
     ) = results
+    # metrics: dict {column_name: (num_runs, num_updates) array}. Keys depend on
+    # the agent (eff_rank / sat_rate / dormant / *_persist); saved per run below.
 
     # --------------------
     # -- Saving --
@@ -1583,12 +2208,23 @@ def main():
         run_object_collected_id = object_collected_id[i]
         run_biome_regret = biome_regret[i]
         run_biome_rank = biome_rank[i]
+        # All plasticity columns for this run, keyed by name (agent-dependent).
+        run_metrics = {k: v[i] for k, v in metrics.items()}
         run_value_ntk_rank = value_ntk_rank[i]
-        run_value_ntk_cond = value_ntk_cond[i]
+        run_value_ntk_eff_rank = value_ntk_eff_rank[i]
         run_value_churn = value_churn[i]
         run_policy_ntk_rank = policy_ntk_rank[i]
-        run_policy_ntk_cond = policy_ntk_cond[i]
+        run_policy_ntk_eff_rank = policy_ntk_eff_rank[i]
         run_policy_churn = policy_churn[i]
+        run_weight_update_norm_pi = weight_update_norm_pi[i]
+        run_weight_update_norm_vf = weight_update_norm_vf[i]
+        run_weight_update_norm_total = weight_update_norm_total[i]
+        run_weight_norm_pi = weight_norm_pi[i]
+        run_weight_norm_vf = weight_norm_vf[i]
+        run_weight_norm_total = weight_norm_total[i]
+        run_weight_drift_pi = weight_drift_pi[i]
+        run_weight_drift_vf = weight_drift_vf[i]
+        run_weight_drift_total = weight_drift_total[i]
         run_frames = frames[i]
         start_time = time.time()
         # for reward in run_rewards:
@@ -1608,6 +2244,20 @@ def main():
         video_path = context.resolve(f"videos/{idx}")
         context.ensureExists(data_path, is_file=True)
         context.ensureExists(video_path, is_file=True)
+
+        # Per-layer gradient norms for this run: one time series per
+        # (norm, layer), plus the constant per-layer parameter count for
+        # offline param-count weighting.
+        run_grad_norm_kwargs = {}
+        for layer, (l0, l1, l2) in grad_norms.items():
+            run_grad_norm_kwargs[f"grad_l0_{layer}"] = l0[i]
+            run_grad_norm_kwargs[f"grad_l1_{layer}"] = l1[i]
+            run_grad_norm_kwargs[f"grad_l2_{layer}"] = l2[i]
+            # 1-d (not 0-d scalar) so the generic npz->DataFrame loader, which
+            # reads v.shape[0] on every key, doesn't choke.
+            run_grad_norm_kwargs[f"grad_nparams_{layer}"] = np.atleast_1d(
+                np.asarray(grad_nparams[layer][i])
+            )
 
         start_time = time.time()
         if config.allocate_frames:
@@ -1633,12 +2283,23 @@ def main():
             object_collected_id=run_object_collected_id,
             biome_regret=run_biome_regret,
             biome_rank=run_biome_rank,
+            **run_metrics,
             value_ntk_rank=run_value_ntk_rank,
-            value_ntk_cond=run_value_ntk_cond,
+            value_ntk_eff_rank=run_value_ntk_eff_rank,
             value_churn=run_value_churn,
             policy_ntk_rank=run_policy_ntk_rank,
-            policy_ntk_cond=run_policy_ntk_cond,
+            policy_ntk_eff_rank=run_policy_ntk_eff_rank,
             policy_churn=run_policy_churn,
+            weight_update_norm_pi=run_weight_update_norm_pi,
+            weight_update_norm_vf=run_weight_update_norm_vf,
+            weight_update_norm_total=run_weight_update_norm_total,
+            weight_norm_pi=run_weight_norm_pi,
+            weight_norm_vf=run_weight_norm_vf,
+            weight_norm_total=run_weight_norm_total,
+            weight_drift_pi=run_weight_drift_pi,
+            weight_drift_vf=run_weight_drift_vf,
+            weight_drift_total=run_weight_drift_total,
+            **run_grad_norm_kwargs,
         )
         total_numpy_time += time.time() - start_time
 

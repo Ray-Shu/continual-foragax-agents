@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=aip-amw8
+#SBATCH --account=aip-whitem
 #SBATCH --job-name=XN35-ForagaxSquareWaveTwoBiome-v11_foragax-sweep_ForagaxSquareWaveTwoBiome-v11_process_hypers
 #SBATCH --mem-per-cpu=128G
 #SBATCH --ntasks=1
@@ -19,6 +19,4 @@ export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_thread
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
 export JAX_PLATFORMS=cpu
 
-$SLURM_TMPDIR/.venv/bin/python experiments/XN35-ForagaxSquareWaveTwoBiome-v11/foragax-sweep/ForagaxSquareWaveTwoBiome-v11/hypers.py
-
-$SLURM_TMPDIR/.venv/bin/python experiments/XN35-ForagaxSquareWaveTwoBiome-v11/foragax/ForagaxSquareWaveTwoBiome-v11/make_frozen_5m_configs.py
+$SLURM_TMPDIR/.venv/bin/python experiments/XN35/foragax-sweep/ForagaxSquareWaveTwoBiome-v11/hypers.py
