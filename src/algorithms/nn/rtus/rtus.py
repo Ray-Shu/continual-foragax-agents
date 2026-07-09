@@ -29,7 +29,8 @@ class ExpRTLRTUs(nn.Module):
             self.stable_r,
             self.alpha,
         )
-        carry, h_t = update_gate(carry, x_t)
+        carry, (h_t_c1, h_t_c2) = update_gate(carry, x_t)
+        h_t = act_options[self.activation](jnp.concatenate((h_t_c1, h_t_c2), axis=-1))
         return carry, h_t  # carry, output
 
     def initialize_state(self, batch_size=1):
