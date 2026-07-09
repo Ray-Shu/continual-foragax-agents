@@ -34,8 +34,14 @@ export JAX_PLATFORMS=cpu
 # $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLP-l2-init_relu -f 9
 # $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLP_crelu -f 9
 # $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLPReLU -f 9
-
 # $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLPReLU RealTimeActorCriticMLP-l2-init_relu RealTimeActorCriticMLP_crelu -f 9 --plot-name RTU-PPO_metric_comparisons
 # $SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLPReLU ActorCriticMLP-l2-init_relu ActorCriticMLP_tanh ActorCriticMLP_tanh_2 -f 9 --plot-name PPO_metric_comparisons
 
-$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLPReLU RealTimeActorCriticMLPReLU -f 9 --plot-name PPO_vs_RTU-PPO
+#$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a ActorCriticMLPReLU RealTimeActorCriticMLPReLU -f 9 --plot-name PPO_vs_RTU-PPO
+
+# Metrics for LOP vs noLOP
+$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLPReLU ActorCriticMLPReLU  -f 9 --plot-name NTKRank_LOP_vs_NoLOP --metrics ntk_rank
+$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLPReLU ActorCriticMLPReLU  -f 9 --plot-name NTKEffRank_LOP_vs_NoLOP --metrics ntk_eff_rank
+$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLPReLU ActorCriticMLPReLU  -f 9 --plot-name churn_LOP_vs_NoLOP --metrics churn
+$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLPReLU ActorCriticMLPReLU  -f 9 --plot-name weightnorm_LOP_vs_NoLOP --metrics weight_norm
+$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R2-plasticity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLPReLU ActorCriticMLPReLU  -f 9 --plot-name weightupdatenorm_LOP_vs_NoLOP --metrics weight_update_norm

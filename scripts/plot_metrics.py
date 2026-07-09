@@ -154,12 +154,12 @@ METRICS = {
         "series": [
             {
                 "role": "actor",
-                "label": "Actor Churn (KL divergence)",
+                "label": "Actor Churn",
                 "cols": ["policy_churn"],
             },
             {
                 "role": "critic",
-                "label": "Relative Critic Churn",
+                "label": "Critic Churn",
                 "cols": ["value_churn", "churn_norm"],
             },
         ],
@@ -265,6 +265,12 @@ def parse_args():
     p.add_argument("--save-type", default="png", help="Image format (png, pdf, ...).")
     p.add_argument(
         "--no-legend", action="store_true", help="Suppress the per-agent legend."
+    )
+    p.add_argument(
+        "--split-roles",
+        action="store_true",
+        help="Save each network role (actor, critic, ...) as its own figure/file "
+        "instead of stacking them as rows in one image.",
     )
     p.add_argument(
         "--list-metrics",
@@ -398,6 +404,126 @@ def _format_xaxis(ax):
     ax.set_xlabel(f"Time steps ($\\times 10^{{{power}}}$)")
 
 
+def render_figure(
+    roles: list, metric_names: list, agents: list, agent_colors: dict, args
+) -> "plt.Figure":
+    """Build one figure: rows are `roles`, columns are `metric_names`.
+
+    Factored out of `main` so it can be called once for the combined actor+critic
+    figure, or once per role when `--split-roles` asks for separate files.
+    """
+    n_rows, n_cols = len(roles), len(metric_names)
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(5 * n_cols, 3.5 * n_rows),
+        squeeze=False,
+        sharex=True,  # every panel is the same env-step axis
+        constrained_layout=True,  # reserves space for the legend/row labels
+        # itself, instead of tight_layout's single guess before they're drawn
+    )
+
+    for c_idx, name in enumerate(metric_names):
+        spec = METRICS[name]
+        col_axes = []  # populated axes in this column, for optional y-sharing
+        for r_idx, role in enumerate(roles):
+            ax = axes[r_idx][c_idx]
+            series = next((s for s in spec["series"] if s["role"] == role), None)
+            if series is None:
+                ax.axis("off")  # this metric has no such role (blank cell)
+                continue
+
+            n_plotted = 0
+            for agent, fov, runs in agents:
+                resolved = resolve_series(runs, series["cols"], args.n_boot, args.ci)
+                if resolved is None:
+                    continue
+                _, (x, mean, lo, hi) = resolved
+                color = agent_colors[agent]
+                # Color == agent; the actor/critic distinction is the row, so no
+                # per-series linestyle/marker is needed.
+                ax.plot(x, mean, color=color, label=get_mapped_label(agent, LABEL_MAP))
+                # Across-seed bootstrap CI band; skipped when <2 seeds (NaN lo/hi).
+                if np.isfinite(lo).any():
+                    ax.fill_between(x, lo, hi, color=color, alpha=0.2, linewidth=0)
+                n_plotted += 1
+
+            # y-label only when it says something the column title doesn't (e.g.
+            # churn's per-row units); otherwise the title alone already names the
+            # metric, and the role is labelled once per row further below.
+            ylabel = series.get("label", spec["label"])
+            if ylabel != spec["title"]:
+                ax.set_ylabel(ylabel)
+            if r_idx == 0:
+                ax.set_title(spec["title"])
+            if spec["log"] and n_plotted > 0:
+                ax.set_yscale("log")
+            ax.spines[["top", "right"]].set_visible(False)
+            if n_plotted == 0:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "no data",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
+            else:
+                col_axes.append(ax)
+            # x-axis label only on the bottom-most row.
+            if r_idx == n_rows - 1:
+                _format_xaxis(ax)
+
+        # Optionally tie the actor/critic rows of this metric to one y-range so
+        # their magnitudes stay directly comparable (skipped when their ranges
+        # differ too much -- e.g. NTK effective rank -- via the registry flag).
+        if spec.get("share_y") and len(col_axes) > 1:
+            lo_y = min(a.get_ylim()[0] for a in col_axes)
+            hi_y = max(a.get_ylim()[1] for a in col_axes)
+            for a in col_axes:
+                a.set_ylim(lo_y, hi_y)
+
+    # Label each row (network role) once, to the left of the leftmost column.
+    # Skipped when there's only one role (its own title already says which role
+    # this figure is, e.g. when --split-roles saves it standalone).
+    if n_rows > 1:
+        for r_idx, role in enumerate(roles):
+            axes[r_idx][0].annotate(
+                role.capitalize(),
+                xy=(0, 0.5),
+                xytext=(-axes[r_idx][0].yaxis.labelpad - 18, 0),
+                xycoords=axes[r_idx][0].yaxis.label,
+                textcoords="offset points",
+                ha="right",
+                va="center",
+                rotation=90,
+                fontweight="bold",
+            )
+
+    # Single agent legend (color == agent), since roles are now rows not colors.
+    if not args.no_legend and len(agents) > 1:
+        from matplotlib.lines import Line2D
+
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                color=agent_colors[a],
+                lw=2,
+                label=get_mapped_label(a, LABEL_MAP),
+            )
+            for a, _, _ in agents
+        ]
+        fig.legend(
+            handles=handles,
+            frameon=False,
+            loc="outside upper center",
+            ncols=len(handles),
+        )
+
+    return fig
+
+
 def main():
     args = parse_args()
 
@@ -479,114 +605,31 @@ def main():
     roles = [
         r
         for r in ROLE_ORDER
-        if any(
-            s["role"] == r for name in metric_names for s in METRICS[name]["series"]
-        )
+        if any(s["role"] == r for name in metric_names for s in METRICS[name]["series"])
     ]
-    n_rows, n_cols = len(roles), len(metric_names)
-    fig, axes = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=(5 * n_cols, 3.5 * n_rows),
-        squeeze=False,
-        sharex=True,  # every panel is the same env-step axis
-    )
-
-    for c_idx, name in enumerate(metric_names):
-        spec = METRICS[name]
-        col_axes = []  # populated axes in this column, for optional y-sharing
-        for r_idx, role in enumerate(roles):
-            ax = axes[r_idx][c_idx]
-            series = next((s for s in spec["series"] if s["role"] == role), None)
-            if series is None:
-                ax.axis("off")  # this metric has no such role (blank cell)
-                continue
-
-            n_plotted = 0
-            for agent, fov, runs in agents:
-                resolved = resolve_series(runs, series["cols"], args.n_boot, args.ci)
-                if resolved is None:
-                    continue
-                _, (x, mean, lo, hi) = resolved
-                color = agent_colors[agent]
-                # Color == agent; the actor/critic distinction is the row, so no
-                # per-series linestyle/marker is needed.
-                ax.plot(x, mean, color=color, label=get_mapped_label(agent, LABEL_MAP))
-                # Across-seed bootstrap CI band; skipped when <2 seeds (NaN lo/hi).
-                if np.isfinite(lo).any():
-                    ax.fill_between(x, lo, hi, color=color, alpha=0.2, linewidth=0)
-                n_plotted += 1
-
-            # y-label carries the metric units (per-row override for churn); the
-            # role is labelled once per row (left column) further below.
-            ax.set_ylabel(series.get("label", spec["label"]))
-            if r_idx == 0:
-                ax.set_title(spec["title"])
-            if spec["log"] and n_plotted > 0:
-                ax.set_yscale("log")
-            ax.spines[["top", "right"]].set_visible(False)
-            if n_plotted == 0:
-                ax.text(
-                    0.5, 0.5, "no data", ha="center", va="center",
-                    transform=ax.transAxes,
-                )
-            else:
-                col_axes.append(ax)
-            # x-axis label only on the bottom-most row.
-            if r_idx == n_rows - 1:
-                _format_xaxis(ax)
-
-        # Optionally tie the actor/critic rows of this metric to one y-range so
-        # their magnitudes stay directly comparable (skipped when their ranges
-        # differ too much -- e.g. NTK effective rank -- via the registry flag).
-        if spec.get("share_y") and len(col_axes) > 1:
-            lo_y = min(a.get_ylim()[0] for a in col_axes)
-            hi_y = max(a.get_ylim()[1] for a in col_axes)
-            for a in col_axes:
-                a.set_ylim(lo_y, hi_y)
-
-    # Label each row (network role) once, to the left of the leftmost column.
-    for r_idx, role in enumerate(roles):
-        axes[r_idx][0].annotate(
-            role.capitalize(),
-            xy=(0, 0.5),
-            xytext=(-axes[r_idx][0].yaxis.labelpad - 18, 0),
-            xycoords=axes[r_idx][0].yaxis.label,
-            textcoords="offset points",
-            ha="right",
-            va="center",
-            rotation=90,
-            fontweight="bold",
-        )
-
-    # Single agent legend (color == agent), since roles are now rows not colors.
-    if not args.no_legend and len(agents) > 1:
-        from matplotlib.lines import Line2D
-
-        handles = [
-            Line2D([0], [0], color=agent_colors[a], lw=2,
-                   label=get_mapped_label(a, LABEL_MAP))
-            for a, _, _ in agents
-        ]
-        fig.legend(handles=handles, frameon=False, loc="upper right")
-
-    fig.tight_layout()
-
-    # Filename: prefer --plot-name, else derive from metric(s) + agent(s).
+    # Filename stem: prefer --plot-name, else derive from metric(s) + agent(s).
     agents_str = "_".join(agent for agent, _, _ in agents)
     if args.plot_name:
-        stem = args.plot_name
+        base_stem = args.plot_name
     elif len(metric_names) == 1:
-        stem = f"metrics_{metric_names[0]}_{agents_str}"
+        base_stem = f"metrics_{metric_names[0]}_{agents_str}"
     else:
-        stem = f"metrics_{agents_str}"
+        base_stem = f"metrics_{agents_str}"
 
     out_dir = ROOT if args.test else metrics_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{stem}.{args.save_type}"
-    fig.savefig(out, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved plot to {out}")
+
+    # --split-roles: one figure/file per role (e.g. actor churn and critic churn
+    # as separate images) instead of stacking every role as a row of one figure.
+    role_groups = [[r] for r in roles] if args.split_roles else [roles]
+
+    for role_group in role_groups:
+        fig = render_figure(role_group, metric_names, agents, agent_colors, args)
+        stem = base_stem if len(role_groups) == 1 else f"{base_stem}_{role_group[0]}"
+        out = out_dir / f"{stem}.{args.save_type}"
+        fig.savefig(out, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved plot to {out}")
 
 
 if __name__ == "__main__":
