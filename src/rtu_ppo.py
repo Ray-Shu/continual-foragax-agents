@@ -98,6 +98,8 @@ class LogEnvState:
 class TrainConfig:
     # ---- STATIC (uniform across vmapped runs) ----
     d_hidden: int = struct.field(pytree_node=False)
+    rtu_type: str = struct.field(pytree_node=False)
+    rtu_alpha: float = struct.field(pytree_node=False)
     hidden_size: int = struct.field(pytree_node=False)
     activation: str = struct.field(pytree_node=False)
     agent_type: str = struct.field(pytree_node=False)
@@ -1071,6 +1073,9 @@ def experiment(rng, config: TrainConfig):
     if _agent_class is ActorCriticMLP:
         kwargs["use_middle_layer"] = config.use_middle_layer
         kwargs["use_midlayer_layernorm"] = config.use_midlayer_layernorm
+    if _agent_class is RealTimeActorCriticMLP:
+        kwargs["rtu_type"] = config.rtu_type
+        kwargs["alpha"] = config.rtu_alpha
 
     # Create and initialize the network. `agent` is dynamically dispatched via
     # getAgent(config.agent_type); pyright sees only the base type so it can't
@@ -2024,6 +2029,8 @@ def main():
             activation = "crelu"
         config = TrainConfig(
             d_hidden=int(hypers["representation"]["d_hidden"]),
+            rtu_type=str(hypers["representation"].get("rtu_type", "linear_rtu")),
+            rtu_alpha=float(hypers["representation"].get("rtu_alpha", 0.9)),
             agent_type=exp.agent,
             hidden_size=int(hypers["representation"]["hidden"]),
             activation=activation,
