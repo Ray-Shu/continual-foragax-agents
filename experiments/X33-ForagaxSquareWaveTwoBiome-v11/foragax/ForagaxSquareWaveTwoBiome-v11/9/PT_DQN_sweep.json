@@ -4,7 +4,7 @@
     "total_steps": 10000000,
     "episode_cutoff": -1,
     "metaParameters": {
-        "epsilon": 0.25,
+        "epsilon": 0.1,
         "target_refresh": 128,
         "buffer_size": 1000,
         "buffer_min_size": 50,
@@ -15,13 +15,12 @@
             "observation_type": "color"
         },
         "experiment": {
-            "save_every": 1000000,
             "seed_offset": 0
         },
         "gamma": 0.99,
         "optimizer": {
             "name": "Adam",
-            "alpha": 0.0003,
+            "alpha": 0.003,
             "beta1": 0.9,
             "beta2": 0.999,
             "eps": 1e-05
