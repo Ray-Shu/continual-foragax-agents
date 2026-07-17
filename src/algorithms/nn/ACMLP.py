@@ -101,6 +101,8 @@ class ActorCriticMLP(nn.Module):
                 critic_embedding = nn.LayerNorm(name="critic_mid_layernorm")(
                     critic_embedding
                 )
+            actor_embedding = activation(actor_embedding)
+            critic_embedding = activation(critic_embedding)
             self.sow("intermediates", "actor_mid", actor_embedding)
             self.sow("intermediates", "critic_mid", critic_embedding)
 
