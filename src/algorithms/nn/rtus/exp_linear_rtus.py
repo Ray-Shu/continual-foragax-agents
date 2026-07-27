@@ -22,10 +22,10 @@ Array = Any
 
 """
 # Linear RTUs with gradient corrections in forward pass
-grad memory: dh_c1_{t-1}/d w_r #0, dh_c2_{t-1}/d w_r #1,  
+grad memory: dh_c1_{t-1}/d w_r #0, dh_c2_{t-1}/d w_r #1,
              dh_c1_{t-1}/d w_theta #2, dh_c2_{t-1}/d w_theta #3,
-             dh_c1_{t-1}/d w_c1_x #4, dh_c2_{t-1}/d w_c1_x #5,  
-             dh_c1_{t-1}/d w_c2_x #6, dh_c2_{t-1}/d w_c2_x #7, 
+             dh_c1_{t-1}/d w_c1_x #4, dh_c2_{t-1}/d w_c1_x #5,
+             dh_c1_{t-1}/d w_c2_x #6, dh_c2_{t-1}/d w_c2_x #7,
 
 dh_c*/d w_r.shape = (batch_size, n_hidden)
 dh_c*/d w_theta.shape = (batch_size, n_hidden)
@@ -87,54 +87,105 @@ class ExpFwdRealTimeLinearRTUs(nn.Module):
             self.params_type
         ](r_param, theta_param, g, phi, norm)
 
+        # normalized new_grad_memories:
+        # new_grad_memory_hc1_w_r = (
+        #     self.alpha * d_g_w_r * h_tminus1_c1
+        #     + (1 - self.alpha) * g * grad_memory[0]
+        #     - self.alpha * d_phi_w_r * h_tminus1_c2
+        #     - (1 - self.alpha) * phi * grad_memory[1]
+        #     + self.alpha * jnp.multiply(d_norm_w_r, w_c1_x_t)
+        # )
+        # new_grad_memory_hc2_w_r = (
+        #     self.alpha * d_g_w_r * h_tminus1_c2
+        #     + (1 - self.alpha) * g * grad_memory[1]
+        #     + self.alpha * d_phi_w_r * h_tminus1_c1
+        #     + (1 - self.alpha) * phi * grad_memory[0]
+        #     + self.alpha * jnp.multiply(d_norm_w_r, w_c2_x_t)
+        # )
+
+        # new_grad_memory_hc1_w_theta = (
+        #     self.alpha * d_g_w_theta * h_tminus1_c1
+        #     + (1 - self.alpha) * g * grad_memory[2]
+        #     - self.alpha * d_phi_w_theta * h_tminus1_c2
+        #     - (1 - self.alpha) * phi * grad_memory[3]
+        # )
+        # new_grad_memory_hc2_w_theta = (
+        #     self.alpha * d_g_w_theta * h_tminus1_c2
+        #     + (1 - self.alpha) * g * grad_memory[3]
+        #     + self.alpha * d_phi_w_theta * h_tminus1_c1
+        #     + (1 - self.alpha) * phi * grad_memory[2]
+        # )
+
+        # unnormalized new grad memories
         new_grad_memory_hc1_w_r = (
-            self.alpha * d_g_w_r * h_tminus1_c1
-            + (1 - self.alpha) * g * grad_memory[0]
-            - self.alpha * d_phi_w_r * h_tminus1_c2
-            - (1 - self.alpha) * phi * grad_memory[1]
-            + self.alpha * jnp.multiply(d_norm_w_r, w_c1_x_t)
+            d_g_w_r * h_tminus1_c1
+            + self.alpha * g * grad_memory[0]
+            - d_phi_w_r * h_tminus1_c2
+            - self.alpha * phi * grad_memory[1]
+            + jnp.multiply(d_norm_w_r, w_c1_x_t)
         )
         new_grad_memory_hc2_w_r = (
-            self.alpha * d_g_w_r * h_tminus1_c2
-            + (1 - self.alpha) * g * grad_memory[1]
-            + self.alpha * d_phi_w_r * h_tminus1_c1
-            + (1 - self.alpha) * phi * grad_memory[0]
-            + self.alpha * jnp.multiply(d_norm_w_r, w_c2_x_t)
+            d_g_w_r * h_tminus1_c2
+            + self.alpha * g * grad_memory[1]
+            + d_phi_w_r * h_tminus1_c1
+            + self.alpha * phi * grad_memory[0]
+            + jnp.multiply(d_norm_w_r, w_c2_x_t)
         )
 
         new_grad_memory_hc1_w_theta = (
-            self.alpha * d_g_w_theta * h_tminus1_c1
-            + (1 - self.alpha) * g * grad_memory[2]
-            - self.alpha * d_phi_w_theta * h_tminus1_c2
-            - (1 - self.alpha) * phi * grad_memory[3]
+            d_g_w_theta * h_tminus1_c1
+            + self.alpha * g * grad_memory[2]
+            - d_phi_w_theta * h_tminus1_c2
+            - self.alpha* phi * grad_memory[3]
         )
         new_grad_memory_hc2_w_theta = (
-            self.alpha * d_g_w_theta * h_tminus1_c2
-            + (1 - self.alpha) * g * grad_memory[3]
-            + self.alpha * d_phi_w_theta * h_tminus1_c1
-            + (1 - self.alpha) * phi * grad_memory[2]
+            d_g_w_theta * h_tminus1_c2
+            + self.alpha * g * grad_memory[3]
+            + d_phi_w_theta * h_tminus1_c1
+            + self.alpha * phi * grad_memory[2]
         )
 
+        # normalized new_grad
+        # new_grad_c1_wx1 = (
+        #     (1 - self.alpha) * jnp.multiply(g, grad_memory[4])
+        #     - (1 - self.alpha) * jnp.multiply(phi, grad_memory[5])
+        #     + self.alpha
+        #     * jnp.multiply(
+        #         norm, jnp.repeat(jnp.expand_dims(x_t, 2), h_t_c1.shape[-1], axis=2)
+        #     )
+        # )
+        # new_grad_c1_wx2 = (1 - self.alpha) * jnp.multiply(g, grad_memory[6]) - (
+        #     1 - self.alpha
+        # ) * jnp.multiply(phi, grad_memory[7])
+
+        # new_grad_c2_wx1 = (1 - self.alpha) * jnp.multiply(g, grad_memory[5]) + (
+        #     1 - self.alpha
+        # ) * jnp.multiply(phi, grad_memory[4])
+        # new_grad_c2_wx2 = (
+        #     (1 - self.alpha) * jnp.multiply(g, grad_memory[7])
+        #     + (1 - self.alpha) * jnp.multiply(phi, grad_memory[6])
+        #     + self.alpha
+        #     * jnp.multiply(
+        #         norm, jnp.repeat(jnp.expand_dims(x_t, 2), h_t_c2.shape[-1], axis=2)
+        #     )
+        # )
+
+        # unnormalized new grad
         new_grad_c1_wx1 = (
-            (1 - self.alpha) * jnp.multiply(g, grad_memory[4])
-            - (1 - self.alpha) * jnp.multiply(phi, grad_memory[5])
-            + self.alpha
-            * jnp.multiply(
+            self.alpha * jnp.multiply(g, grad_memory[4])
+            -self.alpha * jnp.multiply(phi, grad_memory[5])
+            + self.alpha * jnp.multiply(
                 norm, jnp.repeat(jnp.expand_dims(x_t, 2), h_t_c1.shape[-1], axis=2)
             )
         )
-        new_grad_c1_wx2 = (1 - self.alpha) * jnp.multiply(g, grad_memory[6]) - (
-            1 - self.alpha
-        ) * jnp.multiply(phi, grad_memory[7])
+        new_grad_c1_wx2 = self.alpha * jnp.multiply(g, grad_memory[6]) - self.alpha * jnp.multiply(phi, grad_memory[7])
 
-        new_grad_c2_wx1 = (1 - self.alpha) * jnp.multiply(g, grad_memory[5]) + (
-            1 - self.alpha
-        ) * jnp.multiply(phi, grad_memory[4])
+        new_grad_c2_wx1 = self.alpha * jnp.multiply(g, grad_memory[5]) + self.alpha * jnp.multiply(phi, grad_memory[4])
+
         new_grad_c2_wx2 = (
-            (1 - self.alpha) * jnp.multiply(g, grad_memory[7])
-            + (1 - self.alpha) * jnp.multiply(phi, grad_memory[6])
-            + self.alpha
-            * jnp.multiply(
+            self.alpha * jnp.multiply(g, grad_memory[7])
+            + self.alpha * jnp.multiply(phi, grad_memory[6])
+            + self.alpha * jnp.multiply(
                 norm, jnp.repeat(jnp.expand_dims(x_t, 2), h_t_c2.shape[-1], axis=2)
             )
         )

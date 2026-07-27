@@ -40,7 +40,8 @@
             "d_hidden": 512,
             "activation": "relu",
             "use_layernorm": true,
-            "use_middle_layer": true
+            "use_middle_layer": true,
+            "use_midlayer_layernorm": true
         }
     }
 }

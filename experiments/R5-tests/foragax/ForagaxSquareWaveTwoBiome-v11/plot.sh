@@ -52,21 +52,10 @@ EXP=experiments/R4-exp_rtus/foragax/ForagaxSquareWaveTwoBiome-v11
 #     --disable-fov \
 #     --font-size 20
 
-# python src/learning_curve.py "$EXP" \
-#     --metrics ewm_reward \
-#     --plot-name compare_5 \
-#     --filter-alg-apertures RealTimeActorCriticMLPReLU:9 RealTimeActorCriticMLP_09:9 RealTimeActorCriticMLP_099:9 RealTimeActorCriticMLP_0999:9 RealTimeActorCriticMLP_09999:9 RealTimeActorCriticMLP_099999:9\
-#     --end-frame 10000000 \
-#     --legend-on-bar \
-#     --plot-avg \
-#     --horizontal-bars \
-#     --disable-fov \
-#     --font-size 20
-
 python src/learning_curve.py "$EXP" \
     --metrics ewm_reward \
-    --plot-name double_check_2 \
-    --filter-alg-apertures RealTimeActorCriticMLPReLU:9 RealTimeActorCriticMLP_decay:9 \
+    --plot-name compare_3 \
+    --filter-alg-apertures RealTimeActorCriticMLPReLU:9 RealTimeActorCriticMLP_09:9 RealTimeActorCriticMLP_099:9 RealTimeActorCriticMLP_0999:9 RealTimeActorCriticMLP_09999:9 \
     --end-frame 10000000 \
     --legend-on-bar \
     --plot-avg \

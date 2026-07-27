@@ -39,15 +39,15 @@ for fov in 9; do
     #    --entry src/rtu_ppo.py \
     #    -e ${EXP}/${fov}/RealTimeActorCriticMLP_0999_20m.json
 
-    python scripts/slurm.py \
-       --cluster clusters/vulcan-gpu-vmap-32G.json \
-       --tasks 5 --time 06:00:00 --runs 30 --force \
-       --entry src/rtu_ppo.py \
-       -e ${EXP}/${fov}/RealTimeActorCriticMLPReLU.json
+    # python scripts/slurm.py \
+    #    --cluster clusters/vulcan-gpu-vmap-32G.json \
+    #    --tasks 5 --time 06:00:00 --runs 30 --force \
+    #    --entry src/rtu_ppo.py \
+    #    -e ${EXP}/${fov}/RealTimeActorCriticMLPReLU.json
 
     python scripts/slurm.py \
         --cluster clusters/vulcan-gpu-vmap-32G.json \
         --tasks 5 --time 06:00:00 --runs 30 --force \
         --entry src/rtu_ppo.py \
-        -e ${EXP}/${fov}/RealTimeActorCriticMLP_decay.json
+        -e ${EXP}/${fov}/RealTimeActorCriticMLP_09999.json
 done

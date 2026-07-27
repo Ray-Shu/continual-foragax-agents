@@ -1,5 +1,5 @@
 {
-    "agent": "ActorCriticMLP",
+    "agent": "RealTimeActorCriticMLP_unnormalized",
     "problem": "Foragax",
     "total_steps": 10000000,
     "metaParameters": {
@@ -20,10 +20,10 @@
         "gradient_clipping": true,
         "max_grad_norm": 0.5,
         "vf_coef": 0.5,
-        "entropy_coef": 0.1,
+        "entropy_coef": 0.01,
         "optimizer_actor": {
             "name": "Adam",
-            "alpha": 0.0003,
+            "alpha": 0.001,
             "beta1": 0.9,
             "beta2": 0.999,
             "eps": 1e-05
@@ -40,7 +40,8 @@
             "d_hidden": 512,
             "activation": "relu",
             "use_layernorm": true,
-            "use_middle_layer": true
+            "rtu_type": "exp_rtu",
+            "rtu_alpha": 1
         }
     }
 }

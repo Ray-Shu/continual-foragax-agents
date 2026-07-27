@@ -1,5 +1,5 @@
 {
-    "agent": "ActorCriticMLP",
+    "agent": "RealTimeActorCriticMLP_1",
     "problem": "Foragax",
     "total_steps": 10000000,
     "metaParameters": {
@@ -40,7 +40,8 @@
             "d_hidden": 512,
             "activation": "relu",
             "use_layernorm": true,
-            "use_middle_layer": true
+            "rtu_type": "exp_rtu",
+            "rtu_alpha": 1
         }
     }
 }
