@@ -332,7 +332,7 @@ class ResultCollection(Generic[Exp]):
             root_dir=str(self.path),
             recursive=True,
         )
-        paths = [str((self.path / p).absolute().relative_to(project)) for p in paths]
+        paths = [(self.path / p).absolute().relative_to(project).as_posix() for p in paths]
         self.paths = paths
 
     def _result(self, path: str):
