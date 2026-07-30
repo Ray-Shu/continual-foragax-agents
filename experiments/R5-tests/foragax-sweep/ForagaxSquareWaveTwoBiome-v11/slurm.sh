@@ -1,1 +1,0 @@
-python scripts/slurm.py --cluster clusters/vulcan-gpu-vmap-32G.json --tasks 5 --time 03:00:00 --runs 10 --entry src/rtu_ppo.py --force -e experiments/R4-exp_rtus/foragax-sweep/ForagaxSquareWaveTwoBiome-v11/9/RealTimeActorCriticMLP_hypers.json
