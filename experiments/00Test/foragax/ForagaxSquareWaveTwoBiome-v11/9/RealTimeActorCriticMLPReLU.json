@@ -1,7 +1,7 @@
 {
   "agent": "RealTimeActorCriticMLPReLU",
   "problem": "Foragax",
-  "total_steps": 100000,
+  "total_steps": 1000000,
   "metaParameters": {
     "environment": {
       "env_id": "ForagaxSquareWaveTwoBiome-v11",
@@ -14,7 +14,8 @@
       "x_ref_steps": 1000,
       "chunked_ref": 256,
       "weight_norm_freq": 1000,
-      "weight_drift_freq": 1000
+      "weight_drift_freq": 1000,
+      "trace_norm_freq": 1000
     },
     "gamma": 0.99,
     "gae_lambda": 0.95,

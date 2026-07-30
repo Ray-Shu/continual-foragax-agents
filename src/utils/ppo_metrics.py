@@ -44,6 +44,17 @@ distance from init).  Like weight drift, the update norm and the norm are each
 split by actor / critic trunk (plus a global total) since the two trunks share
 no weights and are trained by different objectives.
 
+For real-time RTU agents we also report the *trace norm* ``||e||`` -- the L2
+norm of the RTU eligibility trace (the ``grad_memory`` carried alongside the
+recurrent state), split by trunk on the same actor / critic / total basis.  The
+trace is the online sensitivity ``dh_t/d theta`` that the real-time gradient
+correction multiplies into the backward pass, so its magnitude is what actually
+sets the scale of the RTU's recurrent parameter gradients.  With the
+exponential RTU's ``alpha``-discounted recurrence (``exp_linear_rtus``) the
+trace accumulates geometrically, so an ``alpha`` near 1 can let it grow far past
+the range the linear RTU's trace occupies -- exactly the failure mode this
+metric is meant to make visible.
+
 The Gram is built in row-chunks (see ``_gram_chunked``) so peak memory is bounded
 by the chunk size rather than the reference-set size.
 """
@@ -160,6 +171,97 @@ def weight_drift(
 
 def nan_weight_drift() -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """The ``NaN`` weight-drift triple emitted on non-metric / disabled updates."""
+    nan = jnp.float32(jnp.nan)
+    return nan, nan, nan
+
+
+# A real-time RTU carry is the pair ``(h, e)``: the 2-tuple recurrent state
+# ``h = (h_c1, h_c2)`` and the 8-tuple eligibility trace ``e`` (``grad_memory``
+# in the RTU modules) holding ``dh_c{1,2}/d{w_r, w_theta, w_c1_x, w_c2_x}``.
+# The trace tuple's length is what distinguishes it from the recurrent state,
+# both being plain tuples of arrays.
+_RTU_TRACE_LEN = 8
+
+
+def _carry_traces(carry: Any) -> list:
+    """Collect the eligibility-trace subtrees inside one actor / critic carry.
+
+    Recursive so agents that stack several RTU cells per trunk (e.g.
+    ``RealTimeActorCriticMLPMulti``) contribute every cell's trace.  Returns an
+    empty list for a carry with no RTU cell in it (a feedforward agent's
+    ``None`` hidden state), which is how ``has_rtu_trace`` detects
+    inapplicability.
+    """
+    if (
+        isinstance(carry, tuple)
+        and len(carry) == 2
+        and isinstance(carry[1], tuple)
+        and len(carry[1]) == _RTU_TRACE_LEN
+    ):
+        return [carry[1]]
+    if isinstance(carry, tuple):
+        return [t for sub in carry for t in _carry_traces(sub)]
+    return []
+
+
+def has_rtu_trace(hstate: Any) -> bool:
+    """True iff ``hstate`` carries RTU eligibility traces, i.e. ``trace_norm``
+    applies to this agent.  Called once at trace time to statically gate the
+    metric off for feedforward agents (whose ``initialize_memory`` returns
+    ``None``)."""
+    return (
+        isinstance(hstate, tuple)
+        and len(hstate) > 0
+        and all(_carry_traces(c) for c in hstate)
+    )
+
+
+def trace_norm(hstate: Any) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """L2 norm ``||e||`` of the RTU eligibility trace, split by actor / critic.
+
+    ``e`` is the ``grad_memory`` the real-time RTU carries alongside its
+    recurrent state -- the running ``dh_t/d theta`` sensitivity its custom VJP
+    multiplies into the backward pass.  Reported on the same actor / critic /
+    total basis as ``weight_norm``: the two trunks run independent RTU cells
+    whose traces evolve separately, so a single pooled number would hide a
+    blow-up confined to one of them.
+
+    The norm is taken flat over all 8 trace components.  Note this is dominated
+    by the input-weight traces (``dh/dw_c{1,2}_x``, ``d_input * n_hidden``
+    entries each) rather than the recurrent-parameter traces (``dh/dw_r``,
+    ``dh/dw_theta``, ``n_hidden`` entries each) -- the total is a scale signal,
+    not a per-component diagnostic.
+
+    Expects the standard carry layout used by every real-time agent here: a
+    top-level tuple of per-trunk carries alternating actor, critic (``(actor,
+    critic)``, or ``(actor1, critic1, actor2, critic2)`` for the multi-cell
+    variant).  Guard the call with ``has_rtu_trace``.
+
+    Args:
+        hstate: The live recurrent carry (batch axis of 1 during a rollout).
+
+    Returns:
+        (trace_norm_pi, trace_norm_vf, trace_norm_total) as scalar arrays.
+    """
+    if not has_rtu_trace(hstate):
+        raise ValueError(
+            "trace_norm expects a tuple of RTU carries, each containing an "
+            f"{_RTU_TRACE_LEN}-tuple eligibility trace; got a carry with none. "
+            "Gate the call on has_rtu_trace(hstate)."
+        )
+    sq_leaves: list = []
+    lbl_leaves: list = []
+    for i, carry in enumerate(hstate):
+        label = "pi" if i % 2 == 0 else "vf"  # trunks alternate actor, critic
+        for leaf in jax.tree_util.tree_leaves(_carry_traces(carry)):
+            sq_leaves.append(jnp.sum(jnp.square(leaf)))
+            lbl_leaves.append(label)
+    return _split_pi_vf_total(sq_leaves, lbl_leaves)
+
+
+def nan_trace_norm() -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """The ``NaN`` trace-norm triple emitted on non-metric / disabled updates
+    and for agents with no RTU trace."""
     nan = jnp.float32(jnp.nan)
     return nan, nan, nan
 

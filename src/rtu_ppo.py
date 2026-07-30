@@ -44,9 +44,12 @@ from utils.ml_instrumentation.Sampler import Mean
 from utils.ml_instrumentation.utils import Last
 from utils.ppo_metrics import (
     compute_ppo_metrics,
+    has_rtu_trace,
     nan_ppo_metrics,
+    nan_trace_norm,
     nan_weight_drift,
     nan_weight_norm,
+    trace_norm,
     weight_drift,
     weight_norm,
 )
@@ -139,6 +142,11 @@ class TrainConfig:
     # cadence / flag; the diagnostic counterpart to L2-to-init ("w0") reg.
     compute_weight_drift: bool = struct.field(pytree_node=False)
     weight_drift_freq: int = struct.field(pytree_node=False)
+    # RTU eligibility-trace norm (||e||, split pi/vf/total) -- independent
+    # cadence / flag; only applies to the real-time RTU agents, which carry a
+    # trace alongside the recurrent state.
+    compute_trace_norm: bool = struct.field(pytree_node=False)
+    trace_norm_freq: int = struct.field(pytree_node=False)
     # Plasticity probes (effective rank / dormancy / saturation). Explicit on/off
     # flag; probing additionally requires a probe-instrumented class (_is_probed).
     compute_plasticity: bool = struct.field(pytree_node=False)
@@ -1403,6 +1411,13 @@ def experiment(rng, config: TrainConfig):
     else:
         drift_w0 = None
 
+    # Trace-norm applicability, decided once from the carry structure rather
+    # than from the agent name: only the real-time RTU agents carry an
+    # eligibility trace, and a feedforward agent's initialize_memory returns
+    # None.  A run that asks for the metric on an agent without a trace gets
+    # NaN rather than a trace-time structure error.
+    _has_trace = has_rtu_trace(init_hstate)
+
     env_step_state = (
         train_state,
         gymnax_state,
@@ -1757,6 +1772,28 @@ def experiment(rng, config: TrainConfig):
         else:
             weight_drift_metric = nan_weight_drift()
 
+        # Trace norm: L2 norm of the RTU eligibility trace (split pi / vf /
+        # total), gated on its own trace_norm_freq.  Measured on `last_hstate`
+        # -- the live carry at the end of the rollout, i.e. the trace the online
+        # updates actually accumulated; the PPO update rebuilds its own hidden
+        # states from `hstate_batch` and leaves this carry untouched, so
+        # before/after the update is the same object.  Like the weight norm this
+        # is a pure L2 reduction (no reference batch / Jacobian), just over the
+        # carry instead of the params.  NaN triple on non-metric updates, when
+        # disabled, or for agents with no trace.  Per-update scalars.
+        if config.compute_trace_norm and _has_trace:
+            is_tn_step = _crossed_interval(
+                start_timestep, log_env_state.timestep, config.trace_norm_freq
+            )
+            trace_norm_metric = jax.lax.cond(
+                is_tn_step,
+                lambda _: trace_norm(last_hstate),
+                lambda _: nan_trace_norm(),
+                operand=None,
+            )
+        else:
+            trace_norm_metric = nan_trace_norm()
+
         # Collect a scalar reward summary for this iteration (mean reward over rollout)
         rewards = traj_batch.reward
         pos = traj_batch.info["pos"]
@@ -1814,6 +1851,7 @@ def experiment(rng, config: TrainConfig):
             ntk_metrics,
             weight_norm_metric,
             weight_drift_metric,
+            trace_norm_metric,
         )
 
     # Run training loop with lax.scan (collect per-iteration rewards)
@@ -1837,6 +1875,7 @@ def experiment(rng, config: TrainConfig):
         ntk_metrics,
         weight_norm_metric,
         weight_drift_metric,
+        trace_norm_metric,
     ) = info
     rewards = rewards.reshape((-1))
     pos = pos.reshape((-1, pos.shape[-1]))
@@ -1871,6 +1910,7 @@ def experiment(rng, config: TrainConfig):
     ) = ntk_metrics
     weight_drift_pi, weight_drift_vf, weight_drift_total = weight_drift_metric
     weight_norm_pi, weight_norm_vf, weight_norm_total = weight_norm_metric
+    trace_norm_pi, trace_norm_vf, trace_norm_total = trace_norm_metric
     env_step_state = last_carry.carry[0]
     frames = env_step_state[2].frames
     return (
@@ -1895,6 +1935,7 @@ def experiment(rng, config: TrainConfig):
         ),
         (weight_norm_pi, weight_norm_vf, weight_norm_total),
         (weight_drift_pi, weight_drift_vf, weight_drift_total),
+        (trace_norm_pi, trace_norm_vf, trace_norm_total),
         frames,
         grad_norms,
         grad_nparams,
@@ -2022,6 +2063,12 @@ def main():
             hypers.get("experiment", {}).get("weight_drift_freq", 0)
         )
         compute_weight_drift = weight_drift_freq > 0
+        # RTU eligibility-trace norm (||e||): independent of the metrics above,
+        # controlled by its own experiment.trace_norm_freq (env steps, rounded
+        # up to rollout_steps).  Silently NaN for non-RTU agents, which have no
+        # trace to measure.
+        trace_norm_freq = int(hypers.get("experiment", {}).get("trace_norm_freq", 0))
+        compute_trace_norm = trace_norm_freq > 0
         activation = str(
             hypers.get("representation", {}).get("activation", "tanh")
         ).lower()
@@ -2154,6 +2201,8 @@ def main():
             weight_norm_freq=max(weight_norm_freq, 1),
             compute_weight_drift=compute_weight_drift,
             weight_drift_freq=max(weight_drift_freq, 1),
+            compute_trace_norm=compute_trace_norm,
+            trace_norm_freq=max(trace_norm_freq, 1),
             compute_plasticity=bool(
                 hypers.get("experiment", {}).get("compute_plasticity", False)
             ),
@@ -2186,6 +2235,7 @@ def main():
         ),
         (weight_norm_pi, weight_norm_vf, weight_norm_total),
         (weight_drift_pi, weight_drift_vf, weight_drift_total),
+        (trace_norm_pi, trace_norm_vf, trace_norm_total),
         frames,
         grad_norms,
         grad_nparams,
@@ -2232,6 +2282,9 @@ def main():
         run_weight_drift_pi = weight_drift_pi[i]
         run_weight_drift_vf = weight_drift_vf[i]
         run_weight_drift_total = weight_drift_total[i]
+        run_trace_norm_pi = trace_norm_pi[i]
+        run_trace_norm_vf = trace_norm_vf[i]
+        run_trace_norm_total = trace_norm_total[i]
         run_frames = frames[i]
         start_time = time.time()
         # for reward in run_rewards:
@@ -2306,6 +2359,9 @@ def main():
             weight_drift_pi=run_weight_drift_pi,
             weight_drift_vf=run_weight_drift_vf,
             weight_drift_total=run_weight_drift_total,
+            trace_norm_pi=run_trace_norm_pi,
+            trace_norm_vf=run_trace_norm_vf,
+            trace_norm_total=run_trace_norm_total,
             **run_grad_norm_kwargs,
         )
         total_numpy_time += time.time() - start_time

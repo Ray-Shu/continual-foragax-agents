@@ -194,6 +194,21 @@ METRICS = {
             {"role": "critic", "cols": ["weight_norm_vf"]},
         ],
     },
+    # RTU eligibility-trace norm.  Log y-axis: with the exponential RTU the
+    # trace accumulates geometrically in alpha, so runs at different alpha can
+    # sit orders of magnitude apart and a linear axis flattens all but the
+    # largest.  Only the real-time RTU agents write these columns; others are
+    # all-NaN and are dropped by the finite-data column selection.
+    "trace_norm": {
+        "label": "RTU Trace Norm",
+        "title": "RTU Trace Norm",
+        "log": True,
+        "share_y": True,
+        "series": [
+            {"role": "actor", "cols": ["trace_norm_pi"]},
+            {"role": "critic", "cols": ["trace_norm_vf"]},
+        ],
+    },
 }
 
 # Canonical top-to-bottom row order for the network roles.
