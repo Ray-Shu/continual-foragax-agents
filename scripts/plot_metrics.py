@@ -107,6 +107,48 @@ def build_agent_colors(agent_names: list) -> dict:
     return colors
 
 
+# The 8 RTU ``grad_memory`` slots, mirroring ``utils.ppo_metrics.TRACE_COMPONENTS``
+# (duplicated rather than imported so this plotting script doesn't pull in jax).
+# Keep in sync with that tuple; the order only affects legend/color assignment.
+TRACE_COMPONENTS = (
+    "hc1_w_r",
+    "hc2_w_r",
+    "hc1_w_theta",
+    "hc2_w_theta",
+    "hc1_wx1",
+    "hc2_wx1",
+    "hc1_wx2",
+    "hc2_wx2",
+)
+
+# Legend text for each component: the partial derivative it actually holds.
+COMPONENT_LABELS = {
+    "hc1_w_r": r"$\partial h^{c1}/\partial r$",
+    "hc2_w_r": r"$\partial h^{c2}/\partial r$",
+    "hc1_w_theta": r"$\partial h^{c1}/\partial \theta$",
+    "hc2_w_theta": r"$\partial h^{c2}/\partial \theta$",
+    "hc1_wx1": r"$\partial h^{c1}/\partial W_x^{c1}$",
+    "hc2_wx1": r"$\partial h^{c2}/\partial W_x^{c1}$",
+    "hc1_wx2": r"$\partial h^{c1}/\partial W_x^{c2}$",
+    "hc2_wx2": r"$\partial h^{c2}/\partial W_x^{c2}$",
+}
+
+# Linestyles distinguishing agents on a by-component panel, where color is
+# already spent on the component.
+AGENT_LINESTYLES = ["-", "--", ":", "-."]
+
+
+def component_colors() -> dict:
+    """One color per trace component, distinct from the agent palette.
+
+    By-component panels spend color on the component instead of the agent, so
+    these come from ``tab10`` rather than the Paul Tol agent cycle -- a reader
+    seeing tab10 hues knows the legend is about components.
+    """
+    cmap = plt.get_cmap("tab10")
+    return {c: cmap(i % 10) for i, c in enumerate(TRACE_COMPONENTS)}
+
+
 # Friendly metric name -> panel spec.  A metric holds one or more `series`; each
 # series has a `role` (the network trunk it measures: "actor" / "critic") and a
 # `cols` *priority list* of underlying parquet/npz column names.  For each agent
@@ -207,6 +249,30 @@ METRICS = {
         "series": [
             {"role": "actor", "cols": ["trace_norm_pi"]},
             {"role": "critic", "cols": ["trace_norm_vf"]},
+        ],
+    },
+    # Per-component breakdown of the same trace norm, drawn as its own column so
+    # it sits beside the pooled panel above.  ``by_component`` flips the panel's
+    # coloring rule: every column in `cols` is drawn (rather than the first with
+    # data), color encodes the *trace component* and a figure-level legend names
+    # them, since the pooled norm is set by whichever component is largest and
+    # hides the rest.  Runs predating the per-component columns have no data here
+    # and get a "no data" panel next to their (still valid) pooled one.
+    "trace_norm_components": {
+        "label": "RTU Trace Norm",
+        "title": "RTU Trace Norm by Component",
+        "log": True,
+        "share_y": True,
+        "by_component": True,
+        "series": [
+            {
+                "role": "actor",
+                "cols": [f"trace_norm_pi_{c}" for c in TRACE_COMPONENTS],
+            },
+            {
+                "role": "critic",
+                "cols": [f"trace_norm_vf_{c}" for c in TRACE_COMPONENTS],
+            },
         ],
     },
 }
@@ -419,6 +485,64 @@ def _format_xaxis(ax):
     ax.set_xlabel(f"Time steps ($\\times 10^{{{power}}}$)")
 
 
+def _plot_by_component(ax, cols: list, agents: list, args) -> int:
+    """Draw one line per trace component on `ax`; returns how many were drawn.
+
+    Unlike the default panel -- which picks the first column with data and colors
+    by agent -- every column in `cols` is a *separate* quantity (one
+    ``grad_memory`` slot), so all of them are drawn, colored by component and
+    named in the panel's own legend.  With several agents the component keeps the
+    color and the agent becomes the linestyle, so a 2-agent panel reads as two
+    linestyle families rather than 16 unrelated colors.  Components an agent
+    never wrote (all-NaN) are silently skipped.
+    """
+    colors = component_colors()
+    n_plotted = 0
+    for a_idx, (_agent, _fov, runs) in enumerate(agents):
+        ls = AGENT_LINESTYLES[a_idx % len(AGENT_LINESTYLES)]
+        for col in cols:
+            resolved = resolve_series(runs, [col], args.n_boot, args.ci)
+            if resolved is None:
+                continue
+            _, (x, mean, lo, hi) = resolved
+            comp = col.split("_", 3)[-1]  # trace_norm_{pi,vf}_<component>
+            color = colors.get(comp, "gray")
+            # Labels are omitted: the components are the same in every panel, so
+            # they get one figure-level legend (see `render_figure`) instead of
+            # 8-16 entries repeated over each axes and drawn on top of the data.
+            ax.plot(x, mean, color=color, linestyle=ls)
+            if np.isfinite(lo).any():
+                ax.fill_between(x, lo, hi, color=color, alpha=0.15, linewidth=0)
+            n_plotted += 1
+    return n_plotted
+
+
+def _component_legend_handles(agents: list) -> list:
+    """Legend handles for a by-component figure: one per trace component, plus
+    one per agent when several are drawn (color == component, so the agent is
+    carried by the linestyle and needs its own key)."""
+    from matplotlib.lines import Line2D
+
+    colors = component_colors()
+    handles = [
+        Line2D([0], [0], color=colors[c], lw=2, label=COMPONENT_LABELS.get(c, c))
+        for c in TRACE_COMPONENTS
+    ]
+    if len(agents) > 1:
+        handles += [
+            Line2D(
+                [0],
+                [0],
+                color="black",
+                lw=1.5,
+                linestyle=AGENT_LINESTYLES[i % len(AGENT_LINESTYLES)],
+                label=get_mapped_label(a, LABEL_MAP),
+            )
+            for i, (a, _, _) in enumerate(agents)
+        ]
+    return handles
+
+
 def render_figure(
     roles: list, metric_names: list, agents: list, agent_colors: dict, args
 ) -> "plt.Figure":
@@ -428,6 +552,7 @@ def render_figure(
     figure, or once per role when `--split-roles` asks for separate files.
     """
     n_rows, n_cols = len(roles), len(metric_names)
+    all_by_component = all(METRICS[n].get("by_component") for n in metric_names)
     fig, axes = plt.subplots(
         n_rows,
         n_cols,
@@ -448,20 +573,28 @@ def render_figure(
                 ax.axis("off")  # this metric has no such role (blank cell)
                 continue
 
-            n_plotted = 0
-            for agent, fov, runs in agents:
-                resolved = resolve_series(runs, series["cols"], args.n_boot, args.ci)
-                if resolved is None:
-                    continue
-                _, (x, mean, lo, hi) = resolved
-                color = agent_colors[agent]
-                # Color == agent; the actor/critic distinction is the row, so no
-                # per-series linestyle/marker is needed.
-                ax.plot(x, mean, color=color, label=get_mapped_label(agent, LABEL_MAP))
-                # Across-seed bootstrap CI band; skipped when <2 seeds (NaN lo/hi).
-                if np.isfinite(lo).any():
-                    ax.fill_between(x, lo, hi, color=color, alpha=0.2, linewidth=0)
-                n_plotted += 1
+            if spec.get("by_component"):
+                n_plotted = _plot_by_component(ax, series["cols"], agents, args)
+            else:
+                n_plotted = 0
+                for agent, fov, runs in agents:
+                    resolved = resolve_series(
+                        runs, series["cols"], args.n_boot, args.ci
+                    )
+                    if resolved is None:
+                        continue
+                    _, (x, mean, lo, hi) = resolved
+                    color = agent_colors[agent]
+                    # Color == agent; the actor/critic distinction is the row, so
+                    # no per-series linestyle/marker is needed.
+                    ax.plot(
+                        x, mean, color=color, label=get_mapped_label(agent, LABEL_MAP)
+                    )
+                    # Across-seed bootstrap CI band; skipped when <2 seeds (NaN
+                    # lo/hi).
+                    if np.isfinite(lo).any():
+                        ax.fill_between(x, lo, hi, color=color, alpha=0.2, linewidth=0)
+                    n_plotted += 1
 
             # y-label only when it says something the column title doesn't (e.g.
             # churn's per-row units); otherwise the title alone already names the
@@ -515,8 +648,23 @@ def render_figure(
                 fontweight="bold",
             )
 
+    # Component legend for by-component panels, off to the right so it never
+    # covers the curves.  Drawn once for the whole figure: every by-component
+    # panel uses the same component -> color mapping.
+    drew_components = any(METRICS[n].get("by_component") for n in metric_names)
+    if drew_components and not args.no_legend:
+        fig.legend(
+            handles=_component_legend_handles(agents),
+            frameon=False,
+            loc="outside right upper",
+            fontsize="small",
+            title="Trace component",
+        )
+
     # Single agent legend (color == agent), since roles are now rows not colors.
-    if not args.no_legend and len(agents) > 1:
+    # Skipped on a pure by-component figure, where color means the component and
+    # the agent is already keyed by linestyle in the legend above.
+    if not args.no_legend and len(agents) > 1 and not all_by_component:
         from matplotlib.lines import Line2D
 
         handles = [
@@ -545,7 +693,15 @@ def main():
     if args.list_metrics:
         print("Available metrics (pass to --metric / --metrics):\n")
         for name, spec in METRICS.items():
-            parts = [f"{s['role']}: {'/'.join(s['cols'])}" for s in spec["series"]]
+            if spec.get("by_component"):
+                # 8 columns per role; list the components once instead.
+                parts = [
+                    f"{s['role']}: {len(s['cols'])} components "
+                    f"({', '.join(TRACE_COMPONENTS)})"
+                    for s in spec["series"][:1]
+                ]
+            else:
+                parts = [f"{s['role']}: {'/'.join(s['cols'])}" for s in spec["series"]]
             print(f"  {name:<20} {spec['label']}  <- {'; '.join(parts)}")
         return
 

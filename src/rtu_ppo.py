@@ -1773,7 +1773,9 @@ def experiment(rng, config: TrainConfig):
             weight_drift_metric = nan_weight_drift()
 
         # Trace norm: L2 norm of the RTU eligibility trace (split pi / vf /
-        # total), gated on its own trace_norm_freq.  Measured on `last_hstate`
+        # total, plus one norm per trunk per grad_memory slot -- the pooled
+        # number is dominated by the input-weight slots), gated on its own
+        # trace_norm_freq.  Measured on `last_hstate`
         # -- the live carry at the end of the rollout, i.e. the trace the online
         # updates actually accumulated; the PPO update rebuilds its own hidden
         # states from `hstate_batch` and leaves this carry untouched, so
@@ -1910,7 +1912,14 @@ def experiment(rng, config: TrainConfig):
     ) = ntk_metrics
     weight_drift_pi, weight_drift_vf, weight_drift_total = weight_drift_metric
     weight_norm_pi, weight_norm_vf, weight_norm_total = weight_norm_metric
-    trace_norm_pi, trace_norm_vf, trace_norm_total = trace_norm_metric
+    # trace_norm_components: dict {column_name: (num_updates,) array}, one entry
+    # per (trunk, grad_memory slot) -- see ppo_metrics.TRACE_COMPONENT_COLS.
+    (
+        trace_norm_pi,
+        trace_norm_vf,
+        trace_norm_total,
+        trace_norm_components,
+    ) = trace_norm_metric
     env_step_state = last_carry.carry[0]
     frames = env_step_state[2].frames
     return (
@@ -1935,7 +1944,7 @@ def experiment(rng, config: TrainConfig):
         ),
         (weight_norm_pi, weight_norm_vf, weight_norm_total),
         (weight_drift_pi, weight_drift_vf, weight_drift_total),
-        (trace_norm_pi, trace_norm_vf, trace_norm_total),
+        (trace_norm_pi, trace_norm_vf, trace_norm_total, trace_norm_components),
         frames,
         grad_norms,
         grad_nparams,
@@ -2235,7 +2244,7 @@ def main():
         ),
         (weight_norm_pi, weight_norm_vf, weight_norm_total),
         (weight_drift_pi, weight_drift_vf, weight_drift_total),
-        (trace_norm_pi, trace_norm_vf, trace_norm_total),
+        (trace_norm_pi, trace_norm_vf, trace_norm_total, trace_norm_components),
         frames,
         grad_norms,
         grad_nparams,
@@ -2285,6 +2294,8 @@ def main():
         run_trace_norm_pi = trace_norm_pi[i]
         run_trace_norm_vf = trace_norm_vf[i]
         run_trace_norm_total = trace_norm_total[i]
+        # One column per (trunk, grad_memory slot), e.g. trace_norm_pi_hc1_w_r.
+        run_trace_norm_components = {k: v[i] for k, v in trace_norm_components.items()}
         run_frames = frames[i]
         start_time = time.time()
         # for reward in run_rewards:
@@ -2362,6 +2373,7 @@ def main():
             trace_norm_pi=run_trace_norm_pi,
             trace_norm_vf=run_trace_norm_vf,
             trace_norm_total=run_trace_norm_total,
+            **run_trace_norm_components,
             **run_grad_norm_kwargs,
         )
         total_numpy_time += time.time() - start_time

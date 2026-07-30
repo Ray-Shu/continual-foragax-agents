@@ -53,7 +53,9 @@ sets the scale of the RTU's recurrent parameter gradients.  With the
 exponential RTU's ``alpha``-discounted recurrence (``exp_linear_rtus``) the
 trace accumulates geometrically, so an ``alpha`` near 1 can let it grow far past
 the range the linear RTU's trace occupies -- exactly the failure mode this
-metric is meant to make visible.
+metric is meant to make visible.  Because the pooled norm is dominated by the
+two input-weight components (``d_input`` times as many entries as the recurrent
+ones), it is reported per trace component as well as pooled.
 
 The Gram is built in row-chunks (see ``_gram_chunked``) so peak memory is bounded
 by the chunk size rather than the reference-set size.
@@ -182,6 +184,30 @@ def nan_weight_drift() -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
 # both being plain tuples of arrays.
 _RTU_TRACE_LEN = 8
 
+# Names for the 8 ``grad_memory`` slots, in the order the RTU modules pack them
+# (``linear_rtus.py`` / ``non_linear_rtus.py`` / ``exp_linear_rtus.py``).  Used
+# to name the per-component trace-norm columns; the order must stay in sync with
+# ``new_grad_memory`` in those modules.
+TRACE_COMPONENTS = (
+    "hc1_w_r",  # 0: dh_c1 / dw_r        (n_hidden,)
+    "hc2_w_r",  # 1: dh_c2 / dw_r        (n_hidden,)
+    "hc1_w_theta",  # 2: dh_c1 / dw_theta    (n_hidden,)
+    "hc2_w_theta",  # 3: dh_c2 / dw_theta    (n_hidden,)
+    "hc1_wx1",  # 4: dh_c1 / dw_c1_x     (d_input, n_hidden)
+    "hc2_wx1",  # 5: dh_c2 / dw_c1_x     (d_input, n_hidden)
+    "hc1_wx2",  # 6: dh_c1 / dw_c2_x     (d_input, n_hidden)
+    "hc2_wx2",  # 7: dh_c2 / dw_c2_x     (d_input, n_hidden)
+)
+
+# Every per-component column name, i.e. the keys of the dict ``trace_norm``
+# returns fourth.  Fixed and agent-independent so the ``jax.lax.cond`` measuring
+# it and the ``nan_trace_norm`` fallback have identical output structure.
+TRACE_COMPONENT_COLS = tuple(
+    f"trace_norm_{label}_{comp}"
+    for label in ("pi", "vf")
+    for comp in TRACE_COMPONENTS
+)
+
 
 def _carry_traces(carry: Any) -> list:
     """Collect the eligibility-trace subtrees inside one actor / critic carry.
@@ -216,7 +242,7 @@ def has_rtu_trace(hstate: Any) -> bool:
     )
 
 
-def trace_norm(hstate: Any) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+def trace_norm(hstate: Any) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, dict]:
     """L2 norm ``||e||`` of the RTU eligibility trace, split by actor / critic.
 
     ``e`` is the ``grad_memory`` the real-time RTU carries alongside its
@@ -226,22 +252,35 @@ def trace_norm(hstate: Any) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     whose traces evolve separately, so a single pooled number would hide a
     blow-up confined to one of them.
 
-    The norm is taken flat over all 8 trace components.  Note this is dominated
-    by the input-weight traces (``dh/dw_c{1,2}_x``, ``d_input * n_hidden``
-    entries each) rather than the recurrent-parameter traces (``dh/dw_r``,
-    ``dh/dw_theta``, ``n_hidden`` entries each) -- the total is a scale signal,
-    not a per-component diagnostic.
+    The pooled norms are taken flat over all 8 trace components, so whichever
+    component happens to be largest sets the number and the rest are invisible
+    in it -- empirically the components sit orders of magnitude apart
+    (``dh/dw_theta`` ~1e3, ``dh/dw_c{1,2}_x`` ~1e2, ``dh/dw_r`` ~1e0 on
+    ForagaxSquareWaveTwoBiome-v11), and which one dominates depends on both
+    ``d_input`` (the input-weight traces hold ``d_input * n_hidden`` entries
+    each, the recurrent ones ``n_hidden``) and the trace magnitudes themselves.
+    So the same norm is *also* returned per component: ``||e_c||`` for each of
+    the 8 ``TRACE_COMPONENTS`` in each trunk, which is the actual diagnostic.
+    The
+    pooled numbers are exactly the Euclidean combination of those components
+    (``total^2 = pi^2 + vf^2 = sum_c ||e_c||^2``), so nothing is double-counted.
 
     Expects the standard carry layout used by every real-time agent here: a
     top-level tuple of per-trunk carries alternating actor, critic (``(actor,
     critic)``, or ``(actor1, critic1, actor2, critic2)`` for the multi-cell
-    variant).  Guard the call with ``has_rtu_trace``.
+    variant).  A trunk stacking several RTU cells sums each cell's contribution
+    into that trunk's component, matching how the pooled norms treat them.
+    Guard the call with ``has_rtu_trace``.
 
     Args:
         hstate: The live recurrent carry (batch axis of 1 during a rollout).
 
     Returns:
-        (trace_norm_pi, trace_norm_vf, trace_norm_total) as scalar arrays.
+        ``(trace_norm_pi, trace_norm_vf, trace_norm_total, components)``: three
+        scalar arrays plus a dict keyed by ``TRACE_COMPONENT_COLS`` (e.g.
+        ``trace_norm_pi_hc1_w_r``) of scalar per-component norms.  Every key is
+        always present -- 0.0 for a trunk the carry does not have -- so the
+        structure is static across branches of a ``jax.lax.cond``.
     """
     if not has_rtu_trace(hstate):
         raise ValueError(
@@ -249,21 +288,32 @@ def trace_norm(hstate: Any) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
             f"{_RTU_TRACE_LEN}-tuple eligibility trace; got a carry with none. "
             "Gate the call on has_rtu_trace(hstate)."
         )
-    sq_leaves: list = []
-    lbl_leaves: list = []
+    # Squared norm per (trunk, component); the pooled norms are then just sums
+    # over this table, so the split and the total cannot drift apart.
+    comp_sq = {col: 0.0 for col in TRACE_COMPONENT_COLS}
     for i, carry in enumerate(hstate):
         label = "pi" if i % 2 == 0 else "vf"  # trunks alternate actor, critic
-        for leaf in jax.tree_util.tree_leaves(_carry_traces(carry)):
-            sq_leaves.append(jnp.sum(jnp.square(leaf)))
-            lbl_leaves.append(label)
-    return _split_pi_vf_total(sq_leaves, lbl_leaves)
+        for trace in _carry_traces(carry):  # one 8-tuple per RTU cell
+            for comp, leaf in zip(TRACE_COMPONENTS, trace):
+                col = f"trace_norm_{label}_{comp}"
+                comp_sq[col] = comp_sq[col] + jnp.sum(jnp.square(leaf))
+
+    sq_leaves = list(comp_sq.values())
+    lbl_leaves = ["pi" if "_pi_" in col else "vf" for col in comp_sq]
+    pi, vf, total = _split_pi_vf_total(sq_leaves, lbl_leaves)
+    components = {
+        col: jnp.sqrt(sq).astype(jnp.float32) for col, sq in comp_sq.items()
+    }
+    return pi, vf, total, components
 
 
-def nan_trace_norm() -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """The ``NaN`` trace-norm triple emitted on non-metric / disabled updates
-    and for agents with no RTU trace."""
+def nan_trace_norm() -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, dict]:
+    """The ``NaN`` trace-norm output emitted on non-metric / disabled updates
+    and for agents with no RTU trace.  Structurally identical to ``trace_norm``
+    (same component keys, same dtypes) so the two can be the branches of one
+    ``jax.lax.cond``."""
     nan = jnp.float32(jnp.nan)
-    return nan, nan, nan
+    return nan, nan, nan, {col: nan for col in TRACE_COMPONENT_COLS}
 
 
 def weight_update_norm(

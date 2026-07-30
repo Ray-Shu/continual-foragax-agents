@@ -1,7 +1,7 @@
 {
   "agent": "RealTimeActorCriticMLPReLU",
   "problem": "Foragax",
-  "total_steps": 1000000,
+  "total_steps": 10000,
   "metaParameters": {
     "environment": {
       "env_id": "ForagaxSquareWaveTwoBiome-v11",
@@ -10,9 +10,9 @@
     },
     "experiment": {
       "seed_offset": 0,
-      "ntk_freq": 1000,
-      "x_ref_steps": 1000,
-      "chunked_ref": 256,
+      "ntk_freq": 10000,
+      "x_ref_steps": 200,
+      "chunked_ref": 50,
       "weight_norm_freq": 1000,
       "weight_drift_freq": 1000,
       "trace_norm_freq": 1000
