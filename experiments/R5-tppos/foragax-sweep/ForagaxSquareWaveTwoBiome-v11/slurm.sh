@@ -1,0 +1,1 @@
+python scripts/slurm.py --cluster clusters/vulcan-gpu-vmap-32G.json --tasks 5 --time 03:00:00 --runs 10 --entry src/tppo.py --force -e experiments/R5-tppos/foragax-sweep/ForagaxSquareWaveTwoBiome-v11/9/TransformerPPO_layersTest2.json

@@ -1,7 +1,7 @@
 {
-    "agent": "RealTimeActorCriticMLP_09999",
+    "agent": "RealTimeActorCriticMLP_decay",
     "problem": "Foragax",
-    "total_steps": 10000000,
+    "total_steps": 50000000,
     "metaParameters": {
         "environment": {
             "env_id": "ForagaxSquareWaveTwoBiome-v11",
@@ -9,7 +9,13 @@
             "observation_type": "color"
         },
         "experiment": {
-            "seed_offset": 0
+            "seed_offset": 0,
+            "ntk_freq": 1000000,
+            "x_ref_steps": 1000,
+            "chunked_ref": 256,
+            "weight_norm_freq": 1000000,
+            "weight_drift_freq": 1000000,
+            "trace_norm_freq": 1000000
         },
         "gamma": 0.99,
         "gae_lambda": 0.95,
@@ -20,7 +26,7 @@
         "gradient_clipping": true,
         "max_grad_norm": 0.5,
         "vf_coef": 0.5,
-        "entropy_coef": 0.001,
+        "entropy_coef": 0.01,
         "optimizer_actor": {
             "name": "Adam",
             "alpha": 0.001,
@@ -41,7 +47,7 @@
             "activation": "relu",
             "use_layernorm": true,
             "rtu_type": "exp_rtu",
-            "rtu_alpha": 0.9999
+            "rtu_alpha": 0.999996
         }
     }
 }

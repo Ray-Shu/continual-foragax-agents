@@ -10,11 +10,12 @@
     },
     "experiment": {
       "seed_offset": 0,
-      "ntk_freq": 100000,
+      "ntk_freq": 1000000,
       "x_ref_steps": 1000,
       "chunked_ref": 256,
-      "weight_norm_freq": 100000,
-      "weight_drift_freq": 100000
+      "weight_norm_freq": 1000000,
+      "weight_drift_freq": 1000000,
+      "trace_norm_freq": 1000000
     },
     "gamma": 0.99,
     "gae_lambda": 0.95,

@@ -65,9 +65,9 @@ EXP=experiments/R4-exp_rtus/foragax/ForagaxSquareWaveTwoBiome-v11
 
 python src/learning_curve.py "$EXP" \
     --metrics ewm_reward \
-    --plot-name double_check_2 \
+    --plot-name double_check_50m \
     --filter-alg-apertures RealTimeActorCriticMLPReLU:9 RealTimeActorCriticMLP_decay:9 \
-    --end-frame 10000000 \
+    --end-frame 50000000 \
     --legend-on-bar \
     --plot-avg \
     --horizontal-bars \

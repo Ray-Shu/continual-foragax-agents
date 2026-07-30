@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --account=aip-whitem
-#SBATCH --job-name=R4-exp_rtus_foragax_ForagaxSquareWaveTwoBiome-v11_process_data
-#SBATCH --mem-per-cpu=32G
+#SBATCH --job-name=R4-sanity_foragax_ForagaxSquareWaveTwoBiome-v11_metrics
+#SBATCH --mem-per-cpu=16G
 #SBATCH --ntasks=16
 #SBATCH --output=/scratch/%u/logs/slurm-%j.out
-#SBATCH --time=03:00:00
+#SBATCH --time=02:00:00
 
 set -e
 
@@ -22,4 +22,5 @@ export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_thread
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
 export JAX_PLATFORMS=cpu
 
-$SLURM_TMPDIR/.venv/bin/python src/process_data.py experiments/R4-exp_rtus/foragax/ForagaxSquareWaveTwoBiome-v11
+
+$SLURM_TMPDIR/.venv/bin/python scripts/plot_metrics.py -e experiments/R4-sanity/foragax/ForagaxSquareWaveTwoBiome-v11 -a RealTimeActorCriticMLPReLU RealTimeActorCriticMLP_decay -f 9 --plot-name decay_comparisons

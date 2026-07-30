@@ -1,7 +1,7 @@
 {
     "agent": "RealTimeActorCriticMLP_decay",
     "problem": "Foragax",
-    "total_steps": 20000000,
+    "total_steps": 50000000,
     "metaParameters": {
         "environment": {
             "env_id": "ForagaxSquareWaveTwoBiome-v11",

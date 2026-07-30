@@ -1,5 +1,5 @@
 {
-    "agent": "RealTimeActorCriticMLP_09999",
+    "agent": "TransformerPPO_layersTest",
     "problem": "Foragax",
     "total_steps": 10000000,
     "metaParameters": {
@@ -20,28 +20,29 @@
         "gradient_clipping": true,
         "max_grad_norm": 0.5,
         "vf_coef": 0.5,
-        "entropy_coef": 0.001,
+        "entropy_coef": 0.1,
         "optimizer_actor": {
             "name": "Adam",
-            "alpha": 0.001,
+            "alpha": 0.0003,
             "beta1": 0.9,
             "beta2": 0.999,
             "eps": 1e-05
         },
         "optimizer_critic": {
             "name": "Adam",
-            "lr_scale": 0.1,
+            "lr_scale": 1,
             "beta1": 0.9,
             "beta2": 0.999,
             "eps": 1e-05
         },
         "representation": {
-            "hidden": 64,
-            "d_hidden": 512,
-            "activation": "relu",
-            "use_layernorm": true,
-            "rtu_type": "exp_rtu",
-            "rtu_alpha": 0.9999
+            "d_hidden": 128,
+            "T": 100,
+            "band": null,
+            "num_layers": 3,
+            "d_keys": 32,
+            "d_vals": 32,
+            "d_ff": 256
         }
     }
 }
