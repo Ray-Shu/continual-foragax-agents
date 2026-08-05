@@ -10,13 +10,15 @@ from algorithms.nn.tppo.nets.embedding_net import EmbeddingNet
 from algorithms.nn.tppo.nets.transformer import TransformerBlock
 
 class TransformerPPO(nnx.Module):
-    def __init__(self, T:int, d_hidden:int, d_keys:int, d_vals:int, d_ff: int, rngs:nnx.Rngs, band:int|None = None, num_layers=1):
+    def __init__(self, T:int, d_hidden:int, d_keys:int, d_vals:int, d_ff: int, rngs:nnx.Rngs, band:int|None = None, num_layers=1, activation:str="relu"):
         """
         T: size of the context window
         d_hidden: hidden dim
         d_keys, d_vals: dimensions for queries, keys and values for the attention mechanism
         d_ff: dimension of the feedforward network in transformer block
         band: the "receptive field" of the transformer. Similar to context length, but works with stacks of transformer blocks
+        activation: feedforward nonlinearity -- "swiglu" (gated, 3 matrices) or a
+            pointwise name from nets.transformer.ACTIVATIONS (e.g. "relu", "gelu")
         """
         # params
         self.T = T
@@ -24,6 +26,7 @@ class TransformerPPO(nnx.Module):
         self.d_keys = d_keys
         self.d_vals = d_vals
         self.d_ff = d_ff
+        self.activation = activation
 
         # nets
         self.embed = EmbeddingNet(self.d_hidden, rngs)
@@ -31,7 +34,7 @@ class TransformerPPO(nnx.Module):
         self.critic = CriticHead(self.d_hidden, rngs)
 
         self.blocks = nnx.List([
-            TransformerBlock(self.T, self.d_hidden, self.d_keys, self.d_vals, self.d_ff, rngs, band=band)
+            TransformerBlock(self.T, self.d_hidden, self.d_keys, self.d_vals, self.d_ff, rngs, band=band, activation=self.activation)
             for _ in range(num_layers)
         ])
 

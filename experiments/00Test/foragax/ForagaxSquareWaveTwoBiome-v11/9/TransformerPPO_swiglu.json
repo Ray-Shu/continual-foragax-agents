@@ -42,8 +42,8 @@
       "num_layers": 1,
       "d_keys": 32,
       "d_vals": 32,
-      "d_ff": 256,
-      "activation": "relu"
+      "d_ff": 170,
+      "activation": "swiglu"
     }
   }
 }

@@ -28,9 +28,7 @@ from utils.ml_instrumentation.utils import Last
 # ---------------------------------------------------------------------------
 # Imports of your own code.
 # ---------------------------------------------------------------------------
-# 1) The TransformerPPO network now lives IN this repo at algorithms/nn/tppo/, so
-#    it imports like any other package here (no sys.path hack to a sibling
-#    folder). It is an nnx module, deliberately NOT a getAgent-style linen agent.
+# 1) The TransformerPPO network now lives IN this repo at algorithms/nn/tppo/
 from algorithms.nn.tppo.transformer_ppo import TransformerPPO
 
 # 2) The foragax env, imported exactly like rtu_ppo.py does.
@@ -64,6 +62,9 @@ class Config(NamedTuple):
     d_keys: int = 32
     d_vals: int = 32
     d_ff: int = 128
+    activation: str = "relu"  # swiglu adds a third matrix, so it is ~1.5x the FFN
+                              # params at equal d_ff -- use d_ff*2/3 to match.
+                              
     # ppo
     rollout_steps: int = 2048   # tokens collected per update (N); must be divisible by num_mini_batch
     total_steps: int = 10_000
@@ -267,6 +268,7 @@ def train(config: Config, num_updates: int | None = None):
     model = TransformerPPO(
         config.T, config.d_hidden, config.d_keys, config.d_vals, config.d_ff,
         nnx.Rngs(config.seed), band=band, num_layers=config.num_layers,
+        activation=config.activation,
     )
     # Warm-up call: EmbeddingNet creates its Linear lazily on first call, so we
     # must run one forward BEFORE splitting or the embedding params won't exist.
@@ -519,7 +521,7 @@ def _build_config(exp: ExperimentModel, hypers: dict, seed: int) -> Config:
     """Map a resolved `metaParameters` dict -> tppo Config.
 
     PPO / env fields read the same JSON keys rtu_ppo reads. The transformer-only
-    knobs (T, band, num_layers, d_keys, d_vals, d_ff) come from the
+    knobs (T, band, num_layers, d_keys, d_vals, d_ff, activation) come from the
     `representation` block, each falling back to the Config default when absent --
     so an ActorCriticMLP.json (which has none of them) still runs, and a
     TransformerPPO.json can pin them.
@@ -546,6 +548,7 @@ def _build_config(exp: ExperimentModel, hypers: dict, seed: int) -> Config:
         d_keys=int(rep.get("d_keys", d["d_keys"])),
         d_vals=int(rep.get("d_vals", d["d_vals"])),
         d_ff=int(rep.get("d_ff", d["d_ff"])),
+        activation=str(rep.get("activation", d["activation"])),
         rollout_steps=int(hypers["rollout_steps"]),
         total_steps=int(exp.total_steps),
         num_mini_batch=int(hypers["num_mini_batch"]),
