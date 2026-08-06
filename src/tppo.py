@@ -64,7 +64,12 @@ class Config(NamedTuple):
     d_ff: int = 128
     activation: str = "relu"  # swiglu adds a third matrix, so it is ~1.5x the FFN
                               # params at equal d_ff -- use d_ff*2/3 to match.
-                              
+    gating: str = "residual"  # GTrXL gate replacing each sublayer's residual add:
+                              # residual (ungated) | input | output | highway | sigtanh | gru
+    gate_bias_init: float = 2.0  # b_g; larger starts each block as an identity map.
+                                 # Worth sweeping (~0.1-2); ignored when ungated.
+
+
     # ppo
     rollout_steps: int = 2048   # tokens collected per update (N); must be divisible by num_mini_batch
     total_steps: int = 10_000
@@ -268,7 +273,8 @@ def train(config: Config, num_updates: int | None = None):
     model = TransformerPPO(
         config.T, config.d_hidden, config.d_keys, config.d_vals, config.d_ff,
         nnx.Rngs(config.seed), band=band, num_layers=config.num_layers,
-        activation=config.activation,
+        activation=config.activation, gating=config.gating,
+        gate_bias_init=config.gate_bias_init,
     )
     # Warm-up call: EmbeddingNet creates its Linear lazily on first call, so we
     # must run one forward BEFORE splitting or the embedding params won't exist.
@@ -521,7 +527,8 @@ def _build_config(exp: ExperimentModel, hypers: dict, seed: int) -> Config:
     """Map a resolved `metaParameters` dict -> tppo Config.
 
     PPO / env fields read the same JSON keys rtu_ppo reads. The transformer-only
-    knobs (T, band, num_layers, d_keys, d_vals, d_ff, activation) come from the
+    knobs (T, band, num_layers, d_keys, d_vals, d_ff, activation, gating,
+    gate_bias_init) come from the
     `representation` block, each falling back to the Config default when absent --
     so an ActorCriticMLP.json (which has none of them) still runs, and a
     TransformerPPO.json can pin them.
@@ -549,6 +556,8 @@ def _build_config(exp: ExperimentModel, hypers: dict, seed: int) -> Config:
         d_vals=int(rep.get("d_vals", d["d_vals"])),
         d_ff=int(rep.get("d_ff", d["d_ff"])),
         activation=str(rep.get("activation", d["activation"])),
+        gating=str(rep.get("gating", d["gating"])),
+        gate_bias_init=float(rep.get("gate_bias_init", d["gate_bias_init"])),
         rollout_steps=int(hypers["rollout_steps"]),
         total_steps=int(exp.total_steps),
         num_mini_batch=int(hypers["num_mini_batch"]),
@@ -593,10 +602,11 @@ def main():
         logger.setLevel(logging.INFO)
 
     exp = ExperimentModel.load(args.exp)
-    if exp.agent != "TransformerPPO":
+    if not exp.agent.startswith("TransformerPPO"):
         logger.warning(
-            "experiment agent is '%s', not 'TransformerPPO'; running the "
-            "transformer anyway (transformer knobs fall back to defaults).",
+            "experiment agent is '%s', which is not a TransformerPPO variant; "
+            "running the transformer anyway (any knobs absent from the "
+            "representation block fall back to Config defaults).",
             exp.agent,
         )
     try:
