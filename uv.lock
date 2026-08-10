@@ -225,14 +225,14 @@ wheels = [
 
 [[package]]
 name = "continual-foragax"
-version = "0.55.0"
+version = "0.56.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "gymnax" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ca/fa/e67959a1435219993d5d2d5e0dd511df328d9b4bda317c6aec734ae1e589/continual_foragax-0.55.0.tar.gz", hash = "sha256:a2c4bacf2d9635a3fd7d019a86161e62436ed652f1e5e58d13fadbe90bb37d97", size = 7737499, upload-time = "2026-05-06T19:11:01.654Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/13/e5/bcd9f55a976a5da189848b47233463c1c151d78883f42cc7eb099254e2ee/continual_foragax-0.56.0.tar.gz", hash = "sha256:01b2c545dc458a3118bc87571e843c2d90de8e5980d68955f286db95d5c3eac4", size = 7737710, upload-time = "2026-08-07T04:01:03.305Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/77/20/24344206c7d23bdfd2c285c2c32e0bcd3d30f31028a643ab04181cfeef4c/continual_foragax-0.55.0-py3-none-any.whl", hash = "sha256:79b20f234d651feed2736873192fa6e3b224bce9bf6e9674f1ed52a227b073d2", size = 8251343, upload-time = "2026-05-06T19:10:59.432Z" },
+    { url = "https://files.pythonhosted.org/packages/02/7a/db4545f197d239ce12242bbf4b2a1fb6ca9f88be315b63275c5cb3b88516/continual_foragax-0.56.0-py3-none-any.whl", hash = "sha256:8af2b1efc506116dc4b697600b218dc6da7629310d342f4e5112d3f5c8e8507f", size = 8251412, upload-time = "2026-08-07T04:01:00.693Z" },
 ]
 
 [[package]]
