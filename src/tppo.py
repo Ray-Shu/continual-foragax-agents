@@ -62,6 +62,9 @@ class Config(NamedTuple):
     d_keys: int = 32
     d_vals: int = 32
     d_ff: int = 128
+    num_query_heads: int = 1  # attention heads for queries
+    num_kv_heads: int = 1     # attention heads for keys/values; must divide num_query_heads
+                              # (GQA when 1 < num_kv_heads < num_query_heads, MHA when equal)
     activation: str = "relu"  # swiglu adds a third matrix, so it is ~1.5x the FFN
                               # params at equal d_ff -- use d_ff*2/3 to match.
     gating: str = "residual"  # GTrXL gate replacing each sublayer's residual add:
@@ -273,6 +276,7 @@ def train(config: Config, num_updates: int | None = None):
     model = TransformerPPO(
         config.T, config.d_hidden, config.d_keys, config.d_vals, config.d_ff,
         nnx.Rngs(config.seed), band=band, num_layers=config.num_layers,
+        num_query_heads=config.num_query_heads, num_kv_heads=config.num_kv_heads,
         activation=config.activation, gating=config.gating,
         gate_bias_init=config.gate_bias_init,
     )
@@ -527,8 +531,8 @@ def _build_config(exp: ExperimentModel, hypers: dict, seed: int) -> Config:
     """Map a resolved `metaParameters` dict -> tppo Config.
 
     PPO / env fields read the same JSON keys rtu_ppo reads. The transformer-only
-    knobs (T, band, num_layers, d_keys, d_vals, d_ff, activation, gating,
-    gate_bias_init) come from the
+    knobs (T, band, num_layers, d_keys, d_vals, d_ff, num_query_heads, num_kv_heads,
+    activation, gating, gate_bias_init) come from the
     `representation` block, each falling back to the Config default when absent --
     so an ActorCriticMLP.json (which has none of them) still runs, and a
     TransformerPPO.json can pin them.
@@ -555,6 +559,8 @@ def _build_config(exp: ExperimentModel, hypers: dict, seed: int) -> Config:
         d_keys=int(rep.get("d_keys", d["d_keys"])),
         d_vals=int(rep.get("d_vals", d["d_vals"])),
         d_ff=int(rep.get("d_ff", d["d_ff"])),
+        num_query_heads=int(rep.get("num_query_heads", d["num_query_heads"])),
+        num_kv_heads=int(rep.get("num_kv_heads", d["num_kv_heads"])),
         activation=str(rep.get("activation", d["activation"])),
         gating=str(rep.get("gating", d["gating"])),
         gate_bias_init=float(rep.get("gate_bias_init", d["gate_bias_init"])),
