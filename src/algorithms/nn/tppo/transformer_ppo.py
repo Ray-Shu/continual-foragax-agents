@@ -10,15 +10,15 @@ from algorithms.nn.tppo.nets.embedding_net import EmbeddingNet
 from algorithms.nn.tppo.nets.transformer import TransformerBlock
 
 class TransformerPPO(nnx.Module):
-    def __init__(self, T:int, d_hidden:int, d_keys:int, d_vals:int, d_ff: int, rngs:nnx.Rngs, band:int|None = None, num_layers=1, activation:str="relu", gating:str="residual", gate_bias_init:float=2.0):
+    def __init__(self, T:int, d_hidden:int, d_keys:int, d_vals:int, d_ff: int, rngs:nnx.Rngs, band:int|None = None, num_layers=1, num_query_heads:int=1, num_kv_heads:int=1, activation:str="relu", gating:str="residual", gate_bias_init:float=2.0):
         """
         T: size of the context window
         d_hidden: hidden dim
-        d_keys, d_vals: dimensions for queries, keys and values for the attention mechanism
+        d_keys, d_vals: per-head dimensions for queries/keys and values for the attention mechanism
         d_ff: dimension of the feedforward network in transformer block
         band: the "receptive field" of the transformer. Similar to context length, but works with stacks of transformer blocks
-        activation: feedforward nonlinearity -- "swiglu" (gated, 3 matrices) or a
-            pointwise name from nets.transformer_utils.activations.ACTIVATIONS (e.g. "relu", "gelu")
+        num_query_heads, num_kv_heads: number of attention heads for queries and for keys/values.
+        activation: type of activation function (ie. relu, gelu, elu, swiglu, etc.)
         gating: what replaces each sublayer's residual add -- "residual" (ungated,
             adds no parameters) or a GTrXL gate from nets.transformer_utils.gating.GATES
         gate_bias_init: b_g for the gates that have one; larger starts the gate
@@ -30,6 +30,8 @@ class TransformerPPO(nnx.Module):
         self.d_keys = d_keys
         self.d_vals = d_vals
         self.d_ff = d_ff
+        self.num_query_heads = num_query_heads
+        self.num_kv_heads = num_kv_heads
         self.activation = activation
         self.gating = gating
 
@@ -39,7 +41,7 @@ class TransformerPPO(nnx.Module):
         self.critic = CriticHead(self.d_hidden, rngs)
 
         self.blocks = nnx.List([
-            TransformerBlock(self.T, self.d_hidden, self.d_keys, self.d_vals, self.d_ff, rngs, band=band, activation=self.activation, gating=self.gating, gate_bias_init=gate_bias_init)
+            TransformerBlock(self.T, self.d_hidden, self.d_keys, self.d_vals, self.d_ff, rngs, band=band, num_query_heads=self.num_query_heads, num_kv_heads=self.num_kv_heads, activation=self.activation, gating=self.gating, gate_bias_init=gate_bias_init)
             for _ in range(num_layers)
         ])
 
