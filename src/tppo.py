@@ -83,7 +83,8 @@ class Config(NamedTuple):
     clip_eps: float = 0.2
     vf_coef: float = 0.5
     ent_coef: float = 0.01
-    lr: float = 3e-4
+    lr_pi: float = 3e-4  # trunk (embed+blocks) + actor head
+    lr_vf: float = 3e-4  # critic head only
     max_grad_norm: float = 0.5
 
 
@@ -310,9 +311,30 @@ def train(config: Config, num_updates: int | None = None):
         return tuple(w[None] for w in window)
 
     # ---- optimiser (plain optax, threaded like rtu_ppo's tx) ----
-    tx = optax.chain(
-        optax.clip_by_global_norm(config.max_grad_norm),
-        optax.adam(config.lr),
+    # Split by param path into "vf" (critic head) vs "pi" (everything else --
+    # the actor head plus the shared embed/blocks trunk), same convention
+    # rtu_ppo uses, so optimizer_actor/optimizer_critic give independent LRs.
+    def make_label_tree(params):
+        paths_leaves, treedef = jax.tree_util.tree_flatten_with_path(params)
+        labels = [
+            "vf" if "critic" in jax.tree_util.keystr(path) else "pi"
+            for path, _ in paths_leaves
+        ]
+        return jax.tree_util.tree_unflatten(treedef, labels)
+
+    labels = make_label_tree(params)
+    tx = optax.partition(
+        {
+            "pi": optax.chain(
+                optax.clip_by_global_norm(config.max_grad_norm),
+                optax.adam(config.lr_pi),
+            ),
+            "vf": optax.chain(
+                optax.clip_by_global_norm(config.max_grad_norm),
+                optax.adam(config.lr_vf),
+            ),
+        },
+        labels,
     )
     opt_state = tx.init(params)
 
@@ -573,7 +595,14 @@ def _build_config(exp: ExperimentModel, hypers: dict, seed: int) -> Config:
         clip_eps=float(hypers["clip_eps"]),
         vf_coef=float(hypers["vf_coef"]),
         ent_coef=float(hypers["entropy_coef"]),
-        lr=float(hypers["optimizer_actor"]["alpha"]),
+        lr_pi=float(hypers["optimizer_actor"]["alpha"]),
+        lr_vf=float(
+            hypers["optimizer_critic"].get(
+                "alpha",
+                hypers["optimizer_critic"].get("lr_scale", float("nan"))
+                * hypers["optimizer_actor"]["alpha"],
+            )
+        ),
         max_grad_norm=float(hypers["max_grad_norm"]),
     )
 
