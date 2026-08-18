@@ -78,8 +78,18 @@ def getJobScript(parallel: str, slurm):
         device_str = """export CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps
 export CUDA_MPS_LOG_DIRECTORY=/tmp/nvidia-log
 nvidia-cuda-mps-control -d"""
+        # GPU conv/matmul reductions (cuDNN/cuBLAS) are non-deterministic by
+        # default -- forces deterministic algorithm selection so re-running the
+        # same seed/config reproduces the same learning curve.
+        xla_flags = "--xla_gpu_deterministic_ops=true"
     else:
         device_str = "export JAX_PLATFORMS=cpu"
+        # Multi-threaded Eigen reductions on CPU are also order-nondeterministic;
+        # pin to single-threaded, non-Eigen execution for the same reason.
+        xla_flags = (
+            "--xla_cpu_multi_thread_eigen=false "
+            f"intra_op_parallelism_threads={slurm.threads_per_task}"
+        )
     jobs = math.ceil(
         math.ceil(slurm.cores / slurm.threads_per_task)
         * slurm.tasks_per_core
@@ -101,7 +111,7 @@ export OMP_NUM_THREADS={slurm.threads_per_task}
 export OPENBLAS_NUM_THREADS={slurm.threads_per_task}
 export MKL_NUM_THREADS={slurm.threads_per_task}
 export NPROC={slurm.threads_per_task}
-export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads={slurm.threads_per_task}"
+export XLA_FLAGS="{xla_flags}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION={xla_mem_fraction}
 {device_str}
 

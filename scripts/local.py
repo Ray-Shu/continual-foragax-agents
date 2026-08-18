@@ -56,6 +56,7 @@ if __name__ == "__main__":
             exe = f"python {cmdline.entry} --gpu --silent -e {path} -i "
             env["CUDA_MPS_PIPE_DIRECTORY"] = "/tmp/nvidia-mps"
             env["CUDA_MPS_LOG_DIRECTORY"] = "/tmp/nvidia-log"
+            env["XLA_FLAGS"] = "--xla_gpu_deterministic_ops=true"
             subprocess.run("nvidia-cuda-mps-control -d", shell=True)
         else:
             env["JAX_PLATFORM_NAME"] = "cpu"
