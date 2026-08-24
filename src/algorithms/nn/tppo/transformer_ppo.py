@@ -10,13 +10,13 @@ from algorithms.nn.tppo.nets.embedding_net import EmbeddingNet
 from algorithms.nn.tppo.nets.transformer import TransformerBlock
 
 class TransformerPPO(nnx.Module):
-    def __init__(self, T:int, d_hidden:int, d_keys:int, d_vals:int, d_ff: int, rngs:nnx.Rngs, band:int|None = None, num_layers=1, num_query_heads:int=1, num_kv_heads:int=1, activation:str="relu", gating:str="residual", gate_bias_init:float=2.0):
+    def __init__(self, memory_len:int, d_hidden:int, d_keys:int, d_vals:int, d_ff: int, rngs:nnx.Rngs, num_layers=1, num_query_heads:int=1, num_kv_heads:int=1, activation:str="relu", gating:str="residual", gate_bias_init:float=2.0):
         """
-        T: size of the context window
+        memory_len: size of each layer's stop-gradient memory buffer 
         d_hidden: hidden dim
         d_keys, d_vals: per-head dimensions for queries/keys and values for the attention mechanism
         d_ff: dimension of the feedforward network in transformer block
-        band: the "receptive field" of the transformer. Similar to context length, but works with stacks of transformer blocks
+        num_layers: the vertical number of attention blocks
         num_query_heads, num_kv_heads: number of attention heads for queries and for keys/values.
         activation: type of activation function (ie. relu, gelu, elu, swiglu, etc.)
         gating: what replaces each sublayer's residual add -- "residual" (ungated,
@@ -25,11 +25,12 @@ class TransformerPPO(nnx.Module):
             closer to an identity map. Ignored when gating is "residual"/"input"
         """
         # params
-        self.T = T
+        self.memory_len = memory_len
         self.d_hidden = d_hidden
         self.d_keys = d_keys
         self.d_vals = d_vals
         self.d_ff = d_ff
+        self.num_layers = num_layers
         self.num_query_heads = num_query_heads
         self.num_kv_heads = num_kv_heads
         self.activation = activation
@@ -41,17 +42,23 @@ class TransformerPPO(nnx.Module):
         self.critic = CriticHead(self.d_hidden, rngs)
 
         self.blocks = nnx.List([
-            TransformerBlock(self.T, self.d_hidden, self.d_keys, self.d_vals, self.d_ff, rngs, band=band, num_query_heads=self.num_query_heads, num_kv_heads=self.num_kv_heads, activation=self.activation, gating=self.gating, gate_bias_init=gate_bias_init)
+            TransformerBlock(self.memory_len, self.d_hidden, self.d_keys, self.d_vals, self.d_ff, rngs, num_query_heads=self.num_query_heads, num_kv_heads=self.num_kv_heads, activation=self.activation, gating=self.gating, gate_bias_init=gate_bias_init)
             for _ in range(num_layers)
         ])
 
+    def init_memory(self, batch_size:int): 
+        """Zero memory for all layers. Shape (batch_size, memory_len, d_hidden) for each layer."""
+        return tuple(
+            jnp.zeros((batch_size, self.memory_len, self.d_hidden))
+            for _ in range(self.num_layers)
+        )
 
-    def __call__(self, hidden:Any, obs, read_from=None):
+    def __call__(self, memory, obs, read_from=None):
         """
-        hidden: Any
+        memory: additional memory for the forward pass (B, memory_len, d_hidden) 
         obs: ((B, M, obs_dim), (B, M, action_dim), (B, M, 1)) where:
             - B is the batch size
-            - M is the sequence length: T-1 + N, where T is the context window and N is the rollout buffer size
+            - N is the length of the rollout size
 
         read_from: which positions become decisions.
             None: last position only, (B, .)
@@ -59,10 +66,12 @@ class TransformerPPO(nnx.Module):
         """
         x = self.embed(obs)
 
-        for block in self.blocks:
-            x = block(x)
+        new_memory = []
+        for block, mem in zip(self.blocks, memory): 
+            x, new_mem = block(x, mem) 
+            new_memory.append(new_mem)
 
         h = x[:, -1, :] if read_from is None else x[:, read_from:, :]
         pi, value = self.actor(h), self.critic(h)
 
-        return pi, value
+        return pi, value, tuple(new_memory)
