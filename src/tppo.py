@@ -26,18 +26,14 @@ from utils.ml_instrumentation.Sampler import Mean
 from utils.ml_instrumentation.utils import Last
 
 # ---------------------------------------------------------------------------
-# Imports of your own code.
+# Imports
 # ---------------------------------------------------------------------------
-# 1) The TransformerPPO network now lives IN this repo at algorithms/nn/tppo/
 from algorithms.nn.tppo.transformer_ppo import TransformerPPO
 
-# 2) The foragax env, imported exactly like rtu_ppo.py does.
 sys.path.insert(0, os.path.abspath("/tmp/src"))
 from foragax.registry import make  # noqa: E402
 
-# foragax has 4 discrete actions (rtu_ppo hard-codes this too).
 ACTION_DIM = 4
-
 
 # ---------------------------------------------------------------------------
 # Config -- just the knobs the core loop needs. Plain Python scalars; the jitted
@@ -47,31 +43,20 @@ ACTION_DIM = 4
 class Config(NamedTuple):
     env_id: str
     aperture_size: int = 5
-    # extra `make(env_id, ...)` kwargs (e.g. observation_type), as a sorted tuple
-    # of (key, value) pairs -- mirrors rtu_ppo's env_kwargs so both agents build
-    # the environment identically.
     env_kwargs: Tuple = ()
     seed: int = 0
-    # network
-    T: int = 16          # context window (number of tokens the transformer sees)
-    band: int | None = None   # per-LAYER lookback; None -> T. With num_layers > 1 the
-                              # stack's receptive field is num_layers*(band-1)+1, so set
-                              # band = (T-1)//num_layers + 1 to pin the field at T.
+
+    memory_len: int = 64 
     num_layers: int = 1
     d_hidden: int = 64
     d_keys: int = 32
     d_vals: int = 32
     d_ff: int = 128
     num_query_heads: int = 1  # attention heads for queries
-    num_kv_heads: int = 1     # attention heads for keys/values; must divide num_query_heads
-                              # (GQA when 1 < num_kv_heads < num_query_heads, MHA when equal)
-    activation: str = "relu"  # swiglu adds a third matrix, so it is ~1.5x the FFN
-                              # params at equal d_ff -- use d_ff*2/3 to match.
-    gating: str = "residual"  # GTrXL gate replacing each sublayer's residual add:
-                              # residual (ungated) | input | output | highway | sigtanh | gru
-    gate_bias_init: float = 2.0  # b_g; larger starts each block as an identity map.
-                                 # Worth sweeping (~0.1-2); ignored when ungated.
-
+    num_kv_heads: int = 1     # attention heads for keys/values
+    activation: str = "relu"  
+    gating: str = "residual"  
+    gate_bias_init: float = 2.0  # look at gtrxl paper for more info 
 
     # ppo
     rollout_steps: int = 2048   # tokens collected per update (N); must be divisible by num_mini_batch
@@ -88,12 +73,7 @@ class Config(NamedTuple):
     max_grad_norm: float = 0.5
 
 
-# ---------------------------------------------------------------------------
-# Rollout buffer entry. Same idea as rtu_ppo's Transition, but `obs` is now the
-# per-step TOKEN (obs_img, one-hot last action, last reward) that the transformer
-# will re-embed during the update. We store the RAW token, never an embedding,
-# because the embedding params change every update (see the module docstring).
-# ---------------------------------------------------------------------------
+# Rollout buffer entry.
 class Transition(NamedTuple):
     action: jnp.ndarray      # a_t
     value: jnp.ndarray       # v(o_t), the transformer's value at step t
@@ -113,19 +93,17 @@ class StepInfo(NamedTuple):
     biome_rank: jnp.ndarray          # scalar
 
 
-# State carried across rollouts (the transformer analogue of threading hstate).
+# State carried across rollouts 
 class RolloutState(NamedTuple):
     env_state: Any
-    window: Tuple[jnp.ndarray, ...]  # last T tokens, per component: (T, .)
+    memory: Tuple[jnp.ndarray, ...]  # per-layer memory (1, memory_len, d_hidden)
     last_obs: jnp.ndarray            # next raw obs to turn into a token
     last_action: jnp.ndarray         # a_{t-1}
     last_reward: jnp.ndarray         # r_{t-1}
     timestep: jnp.ndarray
 
 
-# ---------------------------------------------------------------------------
-# Pure helpers (no config, no model) -- these are the "sliding window" mechanics.
-# ---------------------------------------------------------------------------
+# Helpers
 def make_token(obs_img, last_action, last_reward):
     """One transformer input token = (obs image, one-hot last action, last reward).
 
@@ -137,50 +115,8 @@ def make_token(obs_img, last_action, last_reward):
     return (obs_img, a, r)
 
 
-def push(window, token):
-    """Slide the fixed-size window: drop oldest (index 0), append newest at -1.
-
-    A jnp array shift -- NOT a collections.deque -- because this runs inside the
-    jitted rollout scan. window[-1] is always "now".
-    """
-    return tuple(
-        jnp.concatenate([w[1:], t[None]], axis=0) for w, t in zip(window, token)
-    )
-
-
-def init_window(T, img_shape):
-    """Zero window at the very start of training. Only the first T-1 steps of the
-    whole run ever see these zeros (this v1 has no padding mask -- a deliberate
-    simplification; add a key-validity mask later if the warm-up bias matters)."""
-    return (
-        jnp.zeros((T, *img_shape)),
-        jnp.zeros((T, ACTION_DIM)),
-        jnp.zeros((T, 1)),
-    )
-
-
-def build_sequence(window_in, traj_obs):
-    """Splice the carried-in context onto this rollout's tokens -> ONE sequence.
-
-    window_in : the window carried INTO this rollout (tuple of (RF, .)).
-                Its last `prefix` tokens are the context preceding token 0.
-    traj_obs  : this rollout's tokens (tuple of (N, .)), stacked by the scan.
-
-    Returns (prefix + N, .) per component. Transition t lives at index prefix + t,
-    so reading positions [prefix:] yields exactly the N decisions of this rollout.
-
-    This is the array the old build_windows() built and then exploded into N
-    overlapping length-T copies. Not exploding it is the whole optimisation:
-    every token is stored and embedded once instead of up to T times.
-    """
-    return tuple(
-        jnp.concatenate([w[1:], t], axis=0) for w, t in zip(window_in, traj_obs)
-    )
-
-
 @jax.jit
 def calculate_gae(traj_batch, last_val, gamma, gae_lambda):
-    """Standard GAE -- copied verbatim from rtu_ppo.calculate_gae."""
     def _get_advantages(carry, transition):
         gae, next_value = carry
         value, reward = transition.value, transition.reward
@@ -199,8 +135,6 @@ def calculate_gae(traj_batch, last_val, gamma, gae_lambda):
 
 
 def parse_indices(index_specs: list[str], total: int | None = None) -> list[int]:
-    """Copied verbatim from rtu_ppo.parse_indices: expand `-i 0 2 4` or `-i 0:5`
-    (open-ended `-i 3:` uses `total`) into a flat list of run indices."""
     indices = []
     for spec in index_specs:
         if ":" not in spec:
@@ -240,20 +174,8 @@ def train(config: Config, num_updates: int | None = None):
     )
     N = config.rollout_steps
     mb_size = N // config.num_mini_batch
-    # main() passes num_updates (derived from exp.total_steps / --max_steps, like
-    # rtu_ppo); fall back to the config-derived count for standalone calls.
     if num_updates is None:
         num_updates = config.total_steps // config.rollout_steps + 1
-
-    # ---- sliding-window geometry ----
-    # band  : how far back ONE layer looks.
-    # RF    : receptive field of the whole stack -- what ONE decision depends on.
-    #         L blocks compose, each extending reach by (band-1).
-    # prefix: context tokens that must sit in front of the first readable position.
-    # With the defaults (num_layers=1, band=T) these are just T and T-1.
-    band = (config.T - 1) // config.num_layers + 1 if config.band is None else config.band
-    RF = config.num_layers * (band - 1) + 1
-    prefix = RF - 1
 
     # ---- env ----
     env = make(config.env_id, aperture_size=config.aperture_size, **dict(config.env_kwargs))
@@ -267,28 +189,24 @@ def train(config: Config, num_updates: int | None = None):
             "Dict observations (image/hint) are not wired in this minimal script; "
             "use a plain-array foragax env or extend make_token()."
         )
-    img_shape = obs.shape  # VERIFY: (H, W, C) for foragax aperture obs
+    img_shape = obs.shape 
 
     # ---- network ----
-    # Pass the RESOLVED band (line above), not config.band: when config.band is
-    # None and num_layers > 1 the two differ, and the model must use the same
-    # band the RF/prefix geometry was computed from or its attention window and
-    # the spliced context length disagree.
     model = TransformerPPO(
-        config.T, config.d_hidden, config.d_keys, config.d_vals, config.d_ff,
-        nnx.Rngs(config.seed), band=band, num_layers=config.num_layers,
+        config.memory_len, config.d_hidden, config.d_keys, config.d_vals, config.d_ff,
+        nnx.Rngs(config.seed), num_layers=config.num_layers,
         num_query_heads=config.num_query_heads, num_kv_heads=config.num_kv_heads,
         activation=config.activation, gating=config.gating,
         gate_bias_init=config.gate_bias_init,
     )
-    # Warm-up call: EmbeddingNet creates its Linear lazily on first call, so we
-    # must run one forward BEFORE splitting or the embedding params won't exist.
-    # The net is native-batched (obs: (B, M, .)), so give it a leading batch axis.
-    _dummy_window = tuple(w[None] for w in init_window(RF, img_shape))  # (1, RF, .)
-    _ = model(None, _dummy_window)
+    # warm-up call: EmbeddingNet creates its Linear lazily on first call
+    dummy_memory = model.init_memory(batch_size=1)
+    dummy_token = make_token(jnp.zeros(img_shape), jnp.array(0, dtype=jnp.int32), jnp.array(0.0))
+    dummy_obs = tuple(t[None, None] for t in dummy_token)
+    _ = model(dummy_memory, dummy_obs)
 
-    # Functional split: `params` are the trainable leaves (threaded + differentiated),
-    # `graphdef`/`rest` are constant structure + non-Param state (closed over).
+    # Functional split: params are the trainable leaves (threaded + differentiated),
+    # graphdef/rest are constant structure + non-Param state.
     graphdef, params, rest = nnx.split(model, nnx.Param, ...)
 
     n_params = sum(int(x.size) for x in jax.tree_util.tree_leaves(params))
@@ -296,7 +214,7 @@ def train(config: Config, num_updates: int | None = None):
     print(f"[tppo] obs image shape: {img_shape}  | window token dim per step: "
           f"img{tuple(img_shape)} + act({ACTION_DIM}) + rew(1)")
 
-    def forward(params, window, read_from=None):
+    def forward(params, memory, obs, read_from=None):
         """Batched forward: window is a tuple of (B, M, .) arrays.
 
         read_from=None  -> (pi, value) at the LAST position only. Rollout path.
@@ -304,11 +222,11 @@ def train(config: Config, num_updates: int | None = None):
                            one decision per rollout transition. Update path.
         """
         model = nnx.merge(graphdef, params, rest)
-        return model(None, window, read_from=read_from)
+        return model(memory, obs, read_from=read_from)
 
-    def batched(window):
+    def batched(seq):
         """Add a leading batch axis to a single (M, .) sequence -> (1, M, .)."""
-        return tuple(w[None] for w in window)
+        return tuple(s[None] for s in seq)
 
     # ---- optimiser (plain optax, threaded like rtu_ppo's tx) ----
     # Split by param path into "vf" (critic head) vs "pi" (everything else --
@@ -342,12 +260,12 @@ def train(config: Config, num_updates: int | None = None):
     @jax.jit
     def collect_rollout(params, state: RolloutState, rng):
         def _step(carry, _):
-            env_state, window, last_obs, last_action, last_reward, t, rng = carry
+            env_state, memory, last_obs, last_action, last_reward, t, rng = carry
             rng, a_rng, s_rng = jax.random.split(rng, 3)
 
             token = make_token(last_obs, last_action, last_reward)  # (o_t, a_{t-1}, r_{t-1})
-            window = push(window, token)                            # window ends at o_t
-            pi, value = forward(params, batched(window))            # (1, T, .) -> B=1
+            token_b = tuple(tk[None, None] for tk in token)                         
+            pi, value, new_memory = forward(params, memory, token_b)            # (1, T, .) -> B=1
             action_b = pi.sample(seed=a_rng)                        # (1,)
             log_prob_b = pi.log_prob(action_b)                      # (1,)
             action = jnp.squeeze(action_b, 0)                       # scalar for env.step
@@ -363,9 +281,7 @@ def train(config: Config, num_updates: int | None = None):
                 log_prob=log_prob,
                 obs=token,
             )
-            # Cheap logging columns (see StepInfo). env_state is post-step, so
-            # env_state.pos is the position AFTER the action -- same as rtu_ppo,
-            # which sets info["pos"] = env_state.pos after stepping.
+          
             step_info = StepInfo(
                 pos=env_state.pos,
                 biome_id=info["biome_id"],
@@ -373,38 +289,49 @@ def train(config: Config, num_updates: int | None = None):
                 biome_regret=info["biome_regret"],
                 biome_rank=info["biome_rank"],
             )
-            carry = (env_state, window, obs2, action, reward, t + 1, rng)
+            carry = (env_state, new_memory, obs2, action, reward, t + 1, rng)
             return carry, (transition, step_info)
 
-        carry0 = (
-            state.env_state, state.window, state.last_obs,
+        carry = (
+            state.env_state, state.memory, state.last_obs,
             state.last_action, state.last_reward, state.timestep, rng,
         )
-        carry, (traj, step_infos) = jax.lax.scan(
-            _step, carry0, None, length=config.rollout_steps
-        )
-        env_state, window, last_obs, last_action, last_reward, t, rng = carry
 
-        # Bootstrap value at the state AFTER the final action (temporary push, not
-        # persisted -- next rollout pushes last_obs itself as its first token).
+        trajs, step_info_chunks, memory_snapshots = [], [], [] 
+        for _ in range(config.num_mini_batch): 
+            memory_snapshots.append(carry[1])
+            carry, (traj_chunk, info_chunk) = jax.lax.scan(
+                _step, carry, None, length=mb_size
+
+            )
+            trajs.append(traj_chunk)
+            step_info_chunks.append(info_chunk)
+
+        env_state, memory, last_obs, last_action, last_reward, t, rng = carry 
+        traj = jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=0), * trajs)
+        step_infos = jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=0), *step_info_chunks) 
+        memory_snapshots = tuple(
+            jnp.stack(layer_snaps, axis=0) for layer_snaps in zip(*memory_snapshots)
+        )
+
         boot_token = make_token(last_obs, last_action, last_reward)
-        boot_window = push(window, boot_token)
-        _, last_val = forward(params, batched(boot_window))
+        boot_token_b = tuple(tk[None, None] for tk in boot_token)
+        _, last_val, _ = forward(params, memory, boot_token_b)
 
         new_state = RolloutState(
-            env_state=env_state, window=window, last_obs=last_obs,
-            last_action=last_action, last_reward=last_reward, timestep=t,
+            env_state = env_state, memory=memory, last_obs=last_obs,
+            last_action=last_action, last_reward=last_reward, timestep=t
         )
-        return new_state, jnp.squeeze(last_val), traj, step_infos
+
+        return new_state, jnp.squeeze(last_val), traj, step_infos, memory_snapshots
+
 
     # ---------------- loss + update (jitted) ----------------
-    def loss_fn(params, seq, actions, old_log_prob, old_value, adv, targets):
-        # seq: tuple of (prefix + mb_size, .) -- ONE contiguous slice of the rollout,
-        # not mb_size separate windows. Reading positions [prefix:] gives mb_size
-        # decisions out of a single forward pass, which is the whole point: every
-        # token is embedded once instead of once per window it appeared in.
+    def loss_fn(params,memory, seq, actions, old_log_prob, old_value, adv, targets):
+        # memory: this minibatch's starting memory (per-layer tuple)
+        # seq: tuple of (mb_size, .) 
         seq_b = batched(seq)                                  # (1, prefix+mb, .)
-        pi, values = forward(params, seq_b, read_from=prefix)  # pi:(1,mb) values:(1,mb,1)
+        pi, values, _ = forward(params, memory, seq_b, read_from=0)  # pi:(1,mb) values:(1,mb,1)
         log_prob = pi.log_prob(actions[None])[0]              # (mb,)
         values = values[0, :, 0]                              # (mb,)
         entropy = pi.entropy().mean()
@@ -428,34 +355,31 @@ def train(config: Config, num_updates: int | None = None):
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
     @jax.jit
-    def ppo_update(params, opt_state, full, data, rng):
-        # full : tuple of (prefix + N, .) -- the whole rollout as ONE sequence.
-        # data : (actions, old_log_prob, old_value, adv, targets), leading axis N.
+    def ppo_update(params, opt_state, traj_obs, memory_snapshots, data, rng):
+        """
+        traj_obs        : tuple of (N, .) -- this rollout's tokens.
+        memory_snapshots: tuple of (num_mini_batch, 1, memory_len, d_hidden) per layer 
+        data          : (actions, old_log_prob, old_value, adv, targets), leading axis N.
+        """
         def _epoch(carry, _):
             params, opt_state, rng = carry
             rng, perm_rng = jax.random.split(rng)
-            # A sequence cannot be shuffled per-timestep -- position t's context is
-            # the tokens physically before it. So we minibatch over CONTIGUOUS
-            # CHUNKS and shuffle the chunk ORDER instead. Same number of gradient
-            # steps as the per-window version (num_mini_batch * epochs); the cost is
-            # that samples inside a minibatch are temporally correlated.
+
             perm = jax.random.permutation(perm_rng, config.num_mini_batch)
 
             def _minibatch(carry, c):
                 params, opt_state = carry
                 start = c * mb_size
-                # Chunk c reads transitions [start, start+mb_size). Transition t
-                # lives at full[prefix + t], so to read from prefix+start the input
-                # must begin `prefix` tokens earlier -- exactly at index `start`.
-                seq = tuple(
-                    jax.lax.dynamic_slice_in_dim(f, start, prefix + mb_size, axis=0)
-                    for f in full
+                seq = jax.tree_util.tree_map(
+                    lambda x: jax.lax.dynamic_slice_in_dim(x, start, mb_size, axis=0),
+                    traj_obs
                 )
+                mem_c = jax.tree_util.tree_map(lambda m: m[c], memory_snapshots)
                 batch = jax.tree_util.tree_map(
                     lambda x: jax.lax.dynamic_slice_in_dim(x, start, mb_size, axis=0),
                     data,
                 )
-                (loss, aux), grads = grad_fn(params, seq, *batch)
+                (loss, aux), grads = grad_fn(params, mem_c, seq, *batch)
                 updates, opt_state = tx.update(grads, opt_state, params)
                 params = optax.apply_updates(params, updates)
                 return (params, opt_state), (loss, aux)
@@ -473,7 +397,7 @@ def train(config: Config, num_updates: int | None = None):
     # ---------------- outer loop (plain Python, one jit call per phase) ----------------
     state = RolloutState(
         env_state=env_state,
-        window=init_window(RF, img_shape),
+        memory=model.init_memory(batch_size=1), 
         last_obs=obs,
         last_action=jnp.array(0, dtype=jnp.int32),
         last_reward=jnp.array(0.0, dtype=jnp.float32),
@@ -489,23 +413,20 @@ def train(config: Config, num_updates: int | None = None):
     for it in range(num_updates):
         rng, c_rng, u_rng = jax.random.split(rng, 3)
 
-        window_in = state.window  # needed to reconstruct windows for the update
 
         # --- collect (timed; first iter includes JIT compile) ---
         t0 = time.perf_counter()
-        new_state, last_val, traj, step_infos = collect_rollout(params, state, c_rng)
+        new_state, last_val, traj, step_infos, memory_snapshots = collect_rollout(params, state, c_rng)
         jax.block_until_ready((last_val, traj.reward))
         t_collect = time.perf_counter() - t0
 
         # --- advantages ---
         adv, targets = calculate_gae(traj, last_val, config.gamma, config.gae_lambda)
 
-        # --- splice context onto the rollout -> ONE sequence, then update ---
-        full = build_sequence(window_in, traj.obs)
         data = (traj.action, traj.log_prob, traj.value, adv, targets)
 
         t0 = time.perf_counter()
-        params, opt_state, out = ppo_update(params, opt_state, full, data, u_rng)
+        params, opt_state, out = ppo_update(params, opt_state, traj.obs, memory_snapshots, data, u_rng)
         jax.block_until_ready(out)
         t_update = time.perf_counter() - t0
 
@@ -553,7 +474,7 @@ def _build_config(exp: ExperimentModel, hypers: dict, seed: int) -> Config:
     """Map a resolved `metaParameters` dict -> tppo Config.
 
     PPO / env fields read the same JSON keys rtu_ppo reads. The transformer-only
-    knobs (T, band, num_layers, d_keys, d_vals, d_ff, num_query_heads, num_kv_heads,
+    knobs (memory_len, num_layers, d_keys, d_vals, d_ff, num_query_heads, num_kv_heads,
     activation, gating, gate_bias_init) come from the
     `representation` block, each falling back to the Config default when absent --
     so an ActorCriticMLP.json (which has none of them) still runs, and a
@@ -568,14 +489,12 @@ def _build_config(exp: ExperimentModel, hypers: dict, seed: int) -> Config:
         (k, v) for k, v in env.items()
         if k not in ("aperture_size", "env_id", "render_mode") and v is not None
     ))
-    band = rep.get("band", None)
     return Config(
         env_id=env["env_id"],
         aperture_size=int(env["aperture_size"]),
         env_kwargs=env_kwargs,
         seed=seed,
-        T=int(rep.get("T", d["T"])),
-        band=(int(band) if band is not None else None),
+        memory_len=int(rep.get("memory_len", d["memory_len"])),
         num_layers=int(rep.get("num_layers", d["num_layers"])),
         d_hidden=int(rep.get("d_hidden", d["d_hidden"])),
         d_keys=int(rep.get("d_keys", d["d_keys"])),
@@ -679,8 +598,8 @@ def main():
             num_updates = args.max_steps
         config = _build_config(exp, hypers, seed)
         logger.info(
-            "idx=%d seed=%d env=%s T=%d num_layers=%d rollout=%d num_updates=%d",
-            idx, seed, config.env_id, config.T, config.num_layers,
+            "idx=%d seed=%d env=%s memory_len=%d num_layers=%d rollout=%d num_updates=%d",
+            idx, seed, config.env_id, config.memory_len, config.num_layers,
             config.rollout_steps, num_updates,
         )
 

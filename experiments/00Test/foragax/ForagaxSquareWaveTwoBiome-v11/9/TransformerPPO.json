@@ -1,7 +1,7 @@
 {
   "agent": "TransformerPPO",
   "problem": "Foragax",
-  "total_steps": 100000,
+  "total_steps": 1000,
   "metaParameters": {
     "environment": {
       "env_id": "ForagaxSquareWaveTwoBiome-v11",
@@ -13,9 +13,9 @@
     },
     "gamma": 0.99,
     "gae_lambda": 0.95,
-    "rollout_steps": 2048,
-    "epochs": 4,
-    "num_mini_batch": 32,
+    "rollout_steps": 100,
+    "epochs": 2,
+    "num_mini_batch": 20,
     "clip_eps": 0.2,
     "gradient_clipping": true,
     "max_grad_norm": 0.5,
@@ -36,13 +36,12 @@
       "eps": 1e-5
     },
     "representation": {
-      "d_hidden": 128,
-      "T": 16,
-      "band": null,
+      "d_hidden": 32,
+      "memory": 32,
       "num_layers": 1,
       "d_keys": 32,
       "d_vals": 32,
-      "d_ff": 256,
+      "d_ff": 64,
       "activation": "relu"
     }
   }

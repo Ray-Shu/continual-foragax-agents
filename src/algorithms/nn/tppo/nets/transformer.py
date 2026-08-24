@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from algorithms.nn.tppo.nets.transformer_utils.activations import make_ffn
+from algorithms.nn.tppo.nets.transformer_utils.activations import make_ffn, ACTIVATIONS
 from algorithms.nn.tppo.nets.transformer_utils.gating import make_gate
 
 def _sinusoidal_embedding(distances, dim): 
@@ -91,6 +91,11 @@ class TransformerBlock(nnx.Module):
 
         attn_out = jnp.matmul(nnx.softmax(scores, axis=-1), V)  # (B, H, M, d_values)
         attn_out = jnp.moveaxis(attn_out, 1, 2).reshape(B, N, self.num_query_heads * self.d_values)
+
+        attn_out = self.output_linear(attn_out)
+        if self.activation != "swiglu":
+            attn_out = ACTIVATIONS[self.activation](attn_out)
+            
         x2 = self.attn_gate(x, self.output_linear(attn_out))
 
         x2_ln = self.layernorm2(x2)
